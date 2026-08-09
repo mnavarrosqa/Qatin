@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "jira-qa": {
+      "command": "node",
+      "args": ["./mcp-server-jira/dist/index.js"],
+      "env": {
+        "JIRA_URL": "${JIRA_URL}",
+        "JIRA_EMAIL": "${JIRA_EMAIL}",
+        "JIRA_API_TOKEN": "${JIRA_API_TOKEN}"
+      }
+    }
+  }
+}

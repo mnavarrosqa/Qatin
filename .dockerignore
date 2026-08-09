@@ -1,0 +1,13 @@
+node_modules
+dist
+logs
+screenshots
+.env
+.git
+.gitignore
+*.log
+.DS_Store
+coverage
+*.md
+deploy.sh
+scripts/
