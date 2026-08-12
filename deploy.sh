@@ -176,7 +176,7 @@ server {
     server_name _;
 
     location / {
-        proxy_pass http://localhost:3000;
+        proxy_pass http://localhost:8545;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection 'upgrade';
@@ -206,6 +206,6 @@ echo -e "${YELLOW}Important next steps:${NC}"
 echo "1. Edit /agent/.env with your Jira and OpenAI credentials"
 echo "2. Restart services: sudo systemctl restart jira-qa-server jira-qa-worker@{1..3}"
 echo "3. Check logs: journalctl -u jira-qa-server -f"
-echo "4. Test API: curl http://localhost:3000/health"
+echo "4. Test API: curl http://localhost:8545/health"
 echo ""
-echo -e "${GREEN}API will be available at: http://$(hostname -I | awk '{print $1}'):3000${NC}"
+echo -e "${GREEN}API will be available at: http://$(hostname -I | awk '{print $1}'):8545${NC}"

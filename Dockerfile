@@ -1,7 +1,7 @@
 FROM node:20-slim
 
-# Install Playwright dependencies
 RUN apt-get update && apt-get install -y \
+    python3 make g++ \
     libnss3 \
     libnspr4 \
     libatk1.0-0 \
@@ -22,27 +22,21 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /agent
 
-# Copy package files
 COPY package*.json ./
 COPY tsconfig.json ./
+COPY web/package*.json ./web/
 
-# Install dependencies
-RUN npm ci --only=production
+RUN npm ci && npm ci --prefix web
 
-# Install Playwright browsers
 RUN npx playwright install chromium
 
-# Copy source code
 COPY src/ ./src/
+COPY web/ ./web/
 
-# Build TypeScript
 RUN npm run build
 
-# Create required directories
-RUN mkdir -p logs screenshots
+RUN mkdir -p logs screenshots data
 
-# Expose API port
-EXPOSE 3000
+EXPOSE 8545
 
-# Default command (can be overridden)
 CMD ["npm", "start"]

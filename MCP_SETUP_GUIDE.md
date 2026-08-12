@@ -63,7 +63,7 @@ MCP_JIRA_SERVER_PATH=/agent/mcp-server-jira/dist/index.js
 ### 2. Testear un Ticket
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 ```

@@ -1,130 +1,172 @@
-# Jira QA Agent 🤖
+# Jira QA Agent (Qatin)
 
-Sistema automatizado de testing QA que lee tickets de Jira, ejecuta tests con Playwright, y publica resultados con screenshots como evidencia.
+Sistema automatizado de testing QA que lee tickets de Jira (o descripciones pegadas), genera estrategias con LLM multi-provider, ejecuta tests con Playwright, y publica resultados con screenshots.
 
-## 🎯 Características
+## Características
 
-- **Análisis Inteligente**: Usa IA (OpenAI GPT-4) para analizar tickets y generar estrategias de testing
-- **Testing Automatizado**: Ejecuta tests UI con Playwright y captura screenshots
-- **Integración Jira**: Lee tickets y publica resultados directamente en comentarios
-- **MCP Support**: Integración con Model Context Protocol para mayor flexibilidad
-- **Procesamiento Paralelo**: Múltiples workers para ejecutar tests concurrentemente
-- **Queue System**: Sistema de colas robusto con Bull y Redis
-- **Screenshots con Anotaciones**: Captura evidencia visual de cada paso
-- **API REST**: Endpoints para triggering manual o integración con CI/CD
-- **Webhook Support**: Auto-trigger cuando tickets cambian a "Ready for QA"
+- **UI de proyectos**: configurá URLs de test, Jira, credenciales, provider/modelo LLM y dispará runs desde el browser
+- **Multi-provider LLM**: OpenAI, DeepSeek, Claude (Anthropic), Ollama (local/remoto), y endpoints OpenAI-compatible (Cursor / custom)
+- **Fuente flexible**: ticket Jira (ID/URL) **o** descripción pegada sin Jira
+- **SQLite**: proyectos, settings globales y historial de runs en `data/qatin.db`
+- **Testing automatizado**: Playwright con screenshots
+- **Integración Jira**: lee tickets y publica resultados (cuando la fuente es Jira)
+- **Cola Redis/Bull**: workers concurrentes
+- **API REST + Webhooks**: trigger manual o auto al pasar a "Ready for QA"
 
-## 🏗️ Arquitectura
+## Arquitectura
 
 ```
-┌─────────────────┐
-│   Jira API      │
-└────────┬────────┘
-         │
-         │ 1. Fetch ticket
-         ▼
-┌─────────────────┐
-│  API Server     │◄─── HTTP POST /api/test-ticket
-│  (Express)      │
-└────────┬────────┘
-         │
-         │ 2. Enqueue job
-         ▼
-┌─────────────────┐
-│  Redis Queue    │
-│  (Bull)         │
-└────────┬────────┘
-         │
-         │ 3. Process jobs
-         ▼
-┌─────────────────────────────────────┐
-│  Workers (1-3 instances)            │
-│  ┌───────────────────────────────┐ │
-│  │ 1. Ticket Analyzer (OpenAI)   │ │
-│  │ 2. Test Executor (Playwright) │ │
-│  │ 3. Results Reporter (Jira)    │ │
-│  └───────────────────────────────┘ │
-└─────────────────────────────────────┘
-         │
-         │ 4. Post results + screenshots
-         ▼
-┌─────────────────┐
-│  Jira Comments  │
-│  + Attachments  │
-└─────────────────┘
+┌──────────────┐     ┌─────────────────┐
+│  React UI    │────▶│  Express API    │
+│  (public/)   │     │  + SQLite       │
+└──────────────┘     └────────┬────────┘
+                              │ enqueue
+                              ▼
+                     ┌─────────────────┐
+                     │  Redis / Bull   │
+                     └────────┬────────┘
+                              │
+                              ▼
+                     ┌─────────────────┐
+                     │ Worker          │
+                     │ LLM router      │
+                     │ Playwright      │
+                     │ Jira (opcional) │
+                     └─────────────────┘
 ```
 
-## 📋 Requisitos
+## Requisitos
 
-- Ubuntu 20.04+ (server o VM)
 - Node.js 20.x
 - Redis
-- Credenciales de Jira Cloud (API Token)
-- OpenAI API Key
+- Credenciales de al menos un LLM (OpenAI / DeepSeek / Anthropic / Ollama / compatible)
+- Credenciales de Jira Cloud (solo si usás tickets Jira)
 
-## 🚀 Instalación
+## Instalación
 
-### 1. Clonar o copiar el proyecto
+### 1. Clonar
 
 ```bash
-cd /opt
-sudo git clone <repository> jira-qa-agent
-cd jira-qa-agent
+git clone <repository> qatin
+cd qatin
 ```
 
-### 2. Configurar variables de entorno
+### 2. Variables de entorno
 
 ```bash
 cp .env.example .env
-nano .env
 ```
 
-Editar con tus credenciales:
-
 ```env
-# Jira
+# Jira (opcional si solo usás paste)
 JIRA_URL=https://your-company.atlassian.net
 JIRA_EMAIL=your-email@company.com
 JIRA_API_TOKEN=your-api-token-here
 
-# OpenAI
-OPENAI_API_KEY=sk-your-openai-key-here
-OPENAI_MODEL=gpt-4-turbo-preview
+# LLM
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4-turbo-preview
+OPENAI_API_KEY=sk-...
+DEEPSEEK_API_KEY=
+ANTHROPIC_API_KEY=
+LLM_BASE_URL=
+LLM_API_KEY=
 
-# App URLs to test
+# Ollama (opcional) — server local o remoto con modelos ya pulled
+# LLM_PROVIDER=ollama
+# LLM_MODEL=llama3.2
+# OLLAMA_BASE_URL=http://192.168.1.10:11434/v1
+
+# Defaults de app (override por proyecto en la UI)
 APP_BASE_URL=https://your-app.com
-APP_STAGING_URL=https://staging.your-app.com
-
-# Optional: Test credentials if your app requires login
 TEST_USER_EMAIL=test@example.com
 TEST_USER_PASSWORD=test-password
+
+REDIS_HOST=localhost
+SQLITE_PATH=./data/qatin.db
+CREDENTIALS_SECRET=change-me-in-production
 ```
 
-### 3. Ejecutar deployment
+### 3. Setup interactivo (primera vez)
 
 ```bash
-chmod +x deploy.sh
-sudo ./deploy.sh
+npm run setup
 ```
 
-Este script:
-- ✅ Instala Node.js, Redis, y dependencias de sistema
-- ✅ Instala dependencias de npm
-- ✅ Instala Playwright y navegadores
-- ✅ Compila TypeScript
-- ✅ Configura systemd services
-- ✅ Inicia todos los servicios
+Te va a ofrecer, con explicación de para qué sirve cada cosa:
 
-## 🎮 Uso
+- Dependencias npm (API, UI, MCP)
+- **Playwright / Chromium** — browser para correr tests UI y screenshots
+- Build del servidor MCP de Jira
+- Build de Qatin (API + UI)
+- Plugin **Engram** (opcional)
 
-### API Endpoints
+Sin preguntas (defaults): `npm run setup -- --yes`  
+Repetir setup: `npm run setup -- --force`
 
-#### 1. Test a Ticket
+Si solo hiciste `npm install`, el postinstall te recuerda correr `npm run setup`.
+
+### 4. Correr
+
+```bash
+# API + UI (sirve public/ en PORT)
+npm start
+
+# Worker (otro proceso)
+npm run worker
+```
+
+Desarrollo:
+
+```bash
+npm run dev          # API
+npm run dev:worker   # worker
+npm run dev:web      # Vite en :5173 con proxy a :8545
+```
+
+Abrí la UI en `http://localhost:8545` (o `:5173` en modo dev web).
+
+## UI
+
+1. **Projects** — crear proyecto con base URL, Jira key, credenciales, provider/modelo
+2. **Settings** — defaults globales de LLM y API keys
+3. **Run test** — elegir proyecto; Jira ID/URL o pegar summary+description; Start test
+4. **Runs** — historial persistido en SQLite
+
+## API Endpoints
+
+### Projects & settings
+
+| Method | Path | Descripción |
+|--------|------|-------------|
+| GET | `/api/providers` | Providers LLM disponibles |
+| GET/POST | `/api/projects` | Listar / crear proyectos |
+| GET/PUT/DELETE | `/api/projects/:id` | CRUD proyecto |
+| POST | `/api/projects/:id/run` | Encolar test (Jira o paste) |
+| GET/PUT | `/api/settings` | Settings globales (keys enmascaradas al leer) |
+| GET | `/api/runs` | Historial de runs |
+
+### Run desde un proyecto
+
+```bash
+# Jira
+curl -X POST http://localhost:8545/api/projects/1/run \
+  -H "Content-Type: application/json" \
+  -d '{"ticketId":"PROJ-123"}'
+
+# Descripción pegada
+curl -X POST http://localhost:8545/api/projects/1/run \
+  -H "Content-Type: application/json" \
+  -d '{"pastedTicket":{"summary":"Login flow","description":"As a user…"}}'
+```
+
+### Legacy: Test a Ticket
 
 **POST** `/api/test-ticket`
 
+
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 ```
@@ -132,7 +174,7 @@ curl -X POST http://localhost:3000/api/test-ticket \
 O con URL:
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketUrl": "https://your-company.atlassian.net/browse/PROJ-123"}'
 ```
@@ -154,7 +196,7 @@ Response:
 **GET** `/api/job-status/:jobId`
 
 ```bash
-curl http://localhost:3000/api/job-status/123
+curl http://localhost:8545/api/job-status/123
 ```
 
 Response:
@@ -182,7 +224,7 @@ Response:
 **GET** `/api/jobs?limit=20`
 
 ```bash
-curl http://localhost:3000/api/jobs?limit=10
+curl http://localhost:8545/api/jobs?limit=10
 ```
 
 #### 4. Health Check
@@ -190,7 +232,7 @@ curl http://localhost:3000/api/jobs?limit=10
 **GET** `/health`
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:8545/health
 ```
 
 ### Webhook Integration
@@ -199,7 +241,7 @@ Configura un webhook en Jira para auto-trigger tests:
 
 1. Ve a **Jira Settings → System → Webhooks**
 2. Create webhook:
-   - **URL**: `http://your-server:3000/api/webhook/jira`
+   - **URL**: `http://your-server:8545/api/webhook/jira`
    - **Events**: Issue Updated
    - **JQL Filter**: `status = "Ready for QA"`
 
@@ -274,7 +316,7 @@ Estos screenshots se suben automáticamente a Jira como attachments.
 ### Test con ticket específico
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 ```
@@ -401,7 +443,7 @@ find /agent/screenshots/ -type f -mtime +30 -delete
 Si expones el API públicamente:
 
 ```bash
-sudo ufw allow 3000/tcp
+sudo ufw allow 8545/tcp
 sudo ufw enable
 ```
 

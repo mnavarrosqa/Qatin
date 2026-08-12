@@ -1,13 +1,53 @@
 import { testQueue } from './queue';
-import { JiraClient } from './clients/jira-client';
-import { TicketAnalyzer } from './agents/ticket-analyzer';
-import { TestExecutor } from './agents/test-executor';
+import { getJiraClient } from './clients/jira-mcp-client';
+import type { JiraMcpClient } from './clients/jira-mcp-client';
+import {
+  TicketAnalyzer,
+  createSyntheticTicket,
+  TestStrategy,
+} from './agents/ticket-analyzer';
+import { TestExecutor, ExecutionResult } from './agents/test-executor';
 import { logger } from './utils/logger';
+import {
+  getDb,
+  updateTestRun,
+  getRunMemory,
+  formatRunMemoryContext,
+  saveRunMemory,
+} from './db';
+import { LlmProvider } from './llm';
+import { isInstalled } from './plugins';
 import dotenv from 'dotenv';
 
 dotenv.config();
+getDb();
 
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_TESTS || '3');
+
+interface ProjectJobConfig {
+  baseUrl?: string;
+  stagingUrl?: string;
+  testUserEmail?: string | null;
+  testUserPassword?: string | null;
+  llmProvider?: LlmProvider;
+  llmModel?: string;
+  llmBaseUrl?: string;
+  jiraUrl?: string;
+  jiraProjectKey?: string;
+}
+
+interface JobData {
+  ticketId: string;
+  projectId?: number | null;
+  runId?: number;
+  source?: 'jira' | 'paste';
+  pastedTicket?: { summary?: string; description?: string };
+  strategy?: TestStrategy;
+  projectConfig?: ProjectJobConfig;
+  timestamp?: number;
+  requestedBy?: string;
+  triggeredBy?: string;
+}
 
 /**
  * Worker process that handles test jobs
@@ -16,116 +56,222 @@ async function startWorker() {
   logger.info('Starting QA worker...');
   logger.info(`Max concurrent jobs: ${MAX_CONCURRENT}`);
 
-  const jiraClient = new JiraClient();
-  const ticketAnalyzer = new TicketAnalyzer();
-  const testExecutor = new TestExecutor();
-
-  // Process jobs from the queue
   testQueue.process('test-ticket', MAX_CONCURRENT, async (job) => {
-    const { ticketId } = job.data;
-    
-    logger.info(`Processing job ${job.id} for ticket ${ticketId}`);
+    const data = job.data as JobData;
+    const {
+      ticketId,
+      runId,
+      source = 'jira',
+      pastedTicket,
+      projectConfig,
+      projectId,
+      strategy: providedStrategy,
+    } = data;
+
+    const label = ticketId || `job-${job.id}`;
+    logger.info(`Processing job ${job.id} for ${label} (source=${source})`);
+
+    const engramOn = isInstalled('engram');
+    const analyzeOptions = {
+      memoryContext: undefined as string | undefined,
+    };
+
+    if (runId) {
+      updateTestRun(runId, { status: 'active' });
+    }
 
     try {
-      // Step 1: Fetch ticket from Jira
       job.progress(10);
-      logger.info(`[${ticketId}] Fetching ticket from Jira...`);
-      const ticket = await jiraClient.getIssue(ticketId);
 
-      // Step 2: Analyze ticket and generate test strategy
-      job.progress(30);
-      logger.info(`[${ticketId}] Analyzing ticket...`);
-      let testStrategy;
-      
-      try {
-        testStrategy = await ticketAnalyzer.analyzeTicket(ticket);
-      } catch (error) {
-        logger.warn(`[${ticketId}] AI analysis failed, using fallback strategy`, error);
-        testStrategy = await ticketAnalyzer.generateFallbackStrategy(ticket);
+      let ticket;
+      let jiraClient: JiraMcpClient | null = null;
+
+      if (source === 'paste') {
+        logger.info(`[${label}] Using pasted ticket description`);
+        ticket = createSyntheticTicket({
+          key: ticketId || `PASTE-${job.id}`,
+          summary: pastedTicket?.summary || 'Ticket pegado',
+          description: pastedTicket?.description || '',
+        });
+      } else {
+        logger.info(`[${label}] Fetching ticket from Jira...`);
+        jiraClient = await getJiraClient();
+        ticket = await jiraClient.getIssue(ticketId);
       }
 
-      logger.info(`[${ticketId}] Generated test strategy with ${testStrategy.scenarios.length} scenarios`);
+      if (engramOn) {
+        const memories = getRunMemory({
+          projectId: projectId ?? null,
+          ticketKey: ticket.key,
+          limit: 5,
+        });
+        const ctx = formatRunMemoryContext(memories);
+        if (ctx) {
+          analyzeOptions.memoryContext = ctx;
+          logger.info(`[${label}] Engram loaded ${memories.length} memories`);
+        }
+      }
 
-      // Step 3: Execute tests
+      job.progress(30);
+
+      let testStrategy: TestStrategy;
+      if (providedStrategy?.scenarios?.length) {
+        logger.info(
+          `[${label}] Using provided test strategy with ${providedStrategy.scenarios.length} scenarios`
+        );
+        testStrategy = providedStrategy;
+      } else {
+        logger.info(`[${label}] Analyzing ticket...`);
+
+        const analyzer = new TicketAnalyzer({
+          provider: projectConfig?.llmProvider,
+          model: projectConfig?.llmModel,
+          baseUrl: projectConfig?.llmBaseUrl,
+        });
+
+        try {
+          testStrategy = await analyzer.analyzeTicket(ticket, analyzeOptions);
+        } catch (error) {
+          logger.warn(`[${label}] AI analysis failed, using fallback strategy`, error);
+          testStrategy = await analyzer.generateFallbackStrategy(ticket, analyzeOptions);
+        }
+
+        logger.info(
+          `[${label}] Generated test strategy with ${testStrategy.scenarios.length} scenarios`
+        );
+      }
+
       job.progress(50);
-      logger.info(`[${ticketId}] Executing tests...`);
+      logger.info(`[${label}] Executing tests...`);
+
+      const testExecutor = new TestExecutor({
+        baseUrl: projectConfig?.baseUrl,
+        testUserEmail: projectConfig?.testUserEmail,
+        testUserPassword: projectConfig?.testUserPassword,
+      });
+
       const executionResults = await testExecutor.executeTests(
-        ticketId,
+        ticket.key,
         testStrategy
       );
 
-      // Step 4: Compile results
       job.progress(80);
-      logger.info(`[${ticketId}] Compiling results...`);
+      logger.info(`[${label}] Compiling results...`);
       const summary = TestExecutor.getSummary(executionResults);
-
-      // Collect all screenshots
-      const allScreenshots = executionResults.flatMap(r => r.screenshots);
-
-      // Generate detailed report
+      const allScreenshots = executionResults.flatMap((r) => r.screenshots);
       const detailsReport = generateDetailedReport(
         testStrategy,
         executionResults,
         summary
       );
 
-      // Step 5: Post results to Jira
-      job.progress(90);
-      logger.info(`[${ticketId}] Posting results to Jira...`);
-      
-      await jiraClient.postTestResults(ticketId, {
-        passed: summary.passed,
-        totalTests: summary.total,
-        passedTests: summary.successful,
-        failedTests: summary.failed,
-        screenshots: allScreenshots,
-        details: detailsReport,
-        executionTime: summary.totalDuration
-      });
-
-      // Add label
-      await jiraClient.addLabel(ticketId, summary.passed ? 'qa-passed' : 'qa-failed');
-
-      // Optionally transition issue
-      if (summary.passed) {
-        await jiraClient.transitionIssue(ticketId, 'QA Approved');
-      } else {
-        await jiraClient.transitionIssue(ticketId, 'QA Failed');
+      if (engramOn) {
+        try {
+          saveEngramMemory({
+            projectId: projectId ?? null,
+            ticketKey: ticket.key,
+            strategy: testStrategy,
+            results: executionResults,
+            summary,
+          });
+          logger.info(`[${label}] Engram saved run memory`);
+        } catch (memErr) {
+          logger.warn(`[${label}] Engram failed to save memory:`, memErr);
+        }
       }
 
-      job.progress(100);
-      logger.info(`[${ticketId}] Job completed successfully`);
+      if (source === 'jira' && jiraClient) {
+        job.progress(90);
+        logger.info(`[${label}] Posting results to Jira...`);
 
-      return {
+        try {
+          await jiraClient.postTestResults(ticket.key, {
+            passed: summary.passed,
+            totalTests: summary.total,
+            passedTests: summary.successful,
+            failedTests: summary.failed,
+            screenshots: allScreenshots,
+            details: detailsReport,
+            executionTime: summary.totalDuration,
+          });
+
+          await jiraClient.addLabel(
+            ticket.key,
+            summary.passed ? 'qa-passed' : 'qa-failed'
+          );
+
+          if (summary.passed) {
+            await jiraClient.transitionIssue(ticket.key, 'QA Approved');
+          } else {
+            await jiraClient.transitionIssue(ticket.key, 'QA Failed');
+          }
+        } catch (jiraError) {
+          logger.warn(`[${label}] Failed to post results to Jira:`, jiraError);
+        }
+      } else {
+        job.progress(90);
+        logger.info(`[${label}] Skipping Jira post (paste source)`);
+      }
+
+      const result = {
         success: true,
-        ticketId,
+        ticketId: ticket.key,
+        source,
         summary,
-        executionResults: executionResults.map(r => ({
+        details: detailsReport,
+        screenshots: allScreenshots.map((s) => ({
+          name: s.name,
+          path: s.path,
+        })),
+        executionResults: executionResults.map((r) => ({
           scenarioId: r.scenarioId,
           success: r.success,
           duration: r.duration,
-          errors: r.errors
-        }))
+          errors: r.errors,
+        })),
       };
 
-    } catch (error: any) {
-      logger.error(`[${ticketId}] Job failed:`, error);
-
-      // Try to post error to Jira
-      try {
-        await jiraClient.postTestResults(ticketId, {
-          passed: false,
-          totalTests: 1,
-          passedTests: 0,
-          failedTests: 1,
-          screenshots: [],
-          details: `Error executing automated tests:\n${error.message}\n\nStack trace:\n${error.stack}`,
-          executionTime: 0
+      if (runId) {
+        updateTestRun(runId, {
+          status: 'completed',
+          result_json: JSON.stringify(result),
+          ticket_id: ticket.key,
         });
+      }
 
-        await jiraClient.addLabel(ticketId, 'qa-error');
-      } catch (postError) {
-        logger.error(`[${ticketId}] Failed to post error to Jira:`, postError);
+      job.progress(100);
+      logger.info(`[${label}] Job completed successfully`);
+      return result;
+    } catch (error: any) {
+      logger.error(`[${label}] Job failed:`, error);
+
+      if (runId) {
+        updateTestRun(runId, {
+          status: 'failed',
+          result_json: JSON.stringify({
+            success: false,
+            error: error.message,
+            stack: error.stack,
+          }),
+        });
+      }
+
+      if (source === 'jira') {
+        try {
+          const jiraClient = await getJiraClient();
+          await jiraClient.postTestResults(ticketId, {
+            passed: false,
+            totalTests: 1,
+            passedTests: 0,
+            failedTests: 1,
+            screenshots: [],
+            details: `Error executing automated tests:\n${error.message}\n\nStack trace:\n${error.stack}`,
+            executionTime: 0,
+          });
+          await jiraClient.addLabel(ticketId, 'qa-error');
+        } catch (postError) {
+          logger.error(`[${label}] Failed to post error to Jira:`, postError);
+        }
       }
 
       throw error;
@@ -135,9 +281,51 @@ async function startWorker() {
   logger.info('Worker started and waiting for jobs...');
 }
 
-/**
- * Generate detailed test report
- */
+function saveEngramMemory(opts: {
+  projectId: number | null;
+  ticketKey: string;
+  strategy: TestStrategy;
+  results: ExecutionResult[];
+  summary: { total: number; successful: number; failed: number; passed: boolean };
+}): void {
+  const { projectId, ticketKey, strategy, results, summary } = opts;
+  const outcome = summary.passed
+    ? 'passed'
+    : summary.failed === summary.total
+      ? 'failed'
+      : 'mixed';
+
+  const failedIds = results.filter((r) => !r.success).map((r) => r.scenarioId);
+  const memorySummary = [
+    strategy.summary,
+    `${summary.successful}/${summary.total} passed`,
+    failedIds.length ? `failed: ${failedIds.join(', ')}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  const selectorNotes: string[] = [];
+  for (const scenario of strategy.scenarios) {
+    const result = results.find((r) => r.scenarioId === scenario.id);
+    const status = result?.success ? 'ok' : 'fail';
+    if (scenario.selectors?.length) {
+      selectorNotes.push(
+        `${scenario.id}[${status}]: ${scenario.selectors.slice(0, 5).join(', ')}`
+      );
+    }
+  }
+
+  saveRunMemory({
+    project_id: projectId,
+    ticket_key: ticketKey,
+    summary: memorySummary,
+    outcome,
+    selectors_json: selectorNotes.length
+      ? JSON.stringify(selectorNotes)
+      : null,
+  });
+}
+
 function generateDetailedReport(
   strategy: any,
   results: any[],
@@ -158,7 +346,7 @@ function generateDetailedReport(
   report += `${'-'.repeat(60)}\n\n`;
 
   for (const result of results) {
-    const status = result.success ? '✅ PASSED' : '❌ FAILED';
+    const status = result.success ? 'PASSED' : 'FAILED';
     report += `[${result.scenarioId}] ${status}\n`;
     report += `Description: ${result.description}\n`;
     report += `Duration: ${(result.duration / 1000).toFixed(2)}s\n`;
@@ -167,7 +355,7 @@ function generateDetailedReport(
     report += `Steps:\n`;
     for (let i = 0; i < result.steps.length; i++) {
       const step = result.steps[i];
-      const stepStatus = step.success ? '✓' : '✗';
+      const stepStatus = step.success ? 'OK' : 'FAIL';
       report += `  ${i + 1}. [${stepStatus}] ${step.step}\n`;
       if (step.error) {
         report += `     Error: ${step.error}\n`;
@@ -190,7 +378,6 @@ function generateDetailedReport(
   return report;
 }
 
-// Handle shutdown gracefully
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down worker...');
   await testQueue.close();
@@ -203,7 +390,6 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-// Start the worker
 startWorker().catch((error) => {
   logger.error('Failed to start worker:', error);
   process.exit(1);

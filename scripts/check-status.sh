@@ -29,7 +29,7 @@ journalctl -u jira-qa-worker@1 -n 5 --no-pager
 echo ""
 
 echo "🌐 API Health Check:"
-curl -s http://localhost:3000/health | jq . 2>/dev/null || echo "API not responding"
+curl -s http://localhost:8545/health | jq . 2>/dev/null || echo "API not responding"
 echo ""
 
 echo "📈 Queue Stats:"

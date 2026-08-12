@@ -1,6 +1,11 @@
 import axios, { AxiosInstance } from 'axios';
 import FormData from 'form-data';
 import { logger } from '../utils/logger';
+import {
+  assertJiraCredentials,
+  getJiraCredentials,
+  jiraAuthHeader,
+} from '../jira/credentials';
 
 export interface JiraIssue {
   key: string;
@@ -34,20 +39,21 @@ export interface TestResult {
 export class JiraClient {
   private client: AxiosInstance;
   private baseUrl: string;
+  private auth: string;
 
   constructor() {
-    this.baseUrl = process.env.JIRA_URL!;
-    const auth = Buffer.from(
-      `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-    ).toString('base64');
+    const creds = getJiraCredentials();
+    assertJiraCredentials(creds);
+    this.baseUrl = creds.url;
+    this.auth = jiraAuthHeader(creds);
 
     this.client = axios.create({
       baseURL: `${this.baseUrl}/rest/api/3`,
       headers: {
-        'Authorization': `Basic ${auth}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
-      }
+        Authorization: this.auth,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
     });
 
     logger.info('Jira client initialized');
@@ -63,7 +69,7 @@ export class JiraClient {
       return response.data;
     } catch (error: any) {
       logger.error(`Error fetching Jira issue ${issueKey}:`, error.message);
-      throw new Error(`Failed to fetch Jira issue: ${error.message}`);
+      throw new Error(`No se pudo traer el issue de Jira: ${error.message}`);
     }
   }
 
@@ -105,7 +111,7 @@ export class JiraClient {
       const status = testResult.passed ? '✅ PASSED' : '❌ FAILED';
       const emoji = testResult.passed ? '✅' : '❌';
       
-      const commentBody = {
+      const commentBody: any = {
         type: 'doc',
         version: 1,
         content: [
@@ -248,7 +254,7 @@ export class JiraClient {
 
     } catch (error: any) {
       logger.error(`Error posting results to Jira:`, error.response?.data || error.message);
-      throw new Error(`Failed to post test results: ${error.message}`);
+      throw new Error(`No se pudieron publicar los resultados del test: ${error.message}`);
     }
   }
 
@@ -273,11 +279,9 @@ export class JiraClient {
         {
           headers: {
             ...form.getHeaders(),
-            'Authorization': `Basic ${Buffer.from(
-              `${process.env.JIRA_EMAIL}:${process.env.JIRA_API_TOKEN}`
-            ).toString('base64')}`,
-            'X-Atlassian-Token': 'no-check'
-          }
+            Authorization: this.auth,
+            'X-Atlassian-Token': 'no-check',
+          },
         }
       );
 

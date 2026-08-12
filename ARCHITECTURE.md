@@ -388,7 +388,7 @@ MAX_CONCURRENT_TESTS=5  # Más tests simultáneos
 **Firewall:**
 ```bash
 # Solo exponer API si necesario
-ufw allow 3000/tcp
+ufw allow 8545/tcp
 ```
 
 **Reverse Proxy:**
@@ -398,7 +398,7 @@ limit_req_zone $binary_remote_addr zone=api:10m rate=10r/m;
 
 location /api/ {
     limit_req zone=api burst=5;
-    proxy_pass http://localhost:3000;
+    proxy_pass http://localhost:8545;
 }
 ```
 

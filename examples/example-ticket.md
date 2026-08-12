@@ -146,7 +146,7 @@ Acceptance Criteria:
 
 ### Comando manual
 ```bash
-curl -X POST http://your-server:3000/api/test-ticket \
+curl -X POST http://your-server:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "USER-123"}'
 ```

@@ -2,7 +2,7 @@
 
 # Test script for Jira QA Agent API
 
-BASE_URL="http://localhost:3000"
+BASE_URL="http://localhost:8545"
 
 echo "🧪 Testing Jira QA Agent API"
 echo ""

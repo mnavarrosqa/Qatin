@@ -2,6 +2,19 @@
 
 Guía rápida para poner en marcha el Jira QA Agent en 5 minutos.
 
+## Opción rápida (local / Mac)
+
+```bash
+npm install
+npm run setup          # interactivo: Playwright, MCP, plugins (con explicación)
+npm start              # terminal 1
+npm run worker         # terminal 2
+```
+
+Abrí http://localhost:8545
+
+---
+
 ## Opción 1: Ubuntu Server (Recomendado para producción)
 
 ### Paso 1: Preparar servidor
@@ -48,7 +61,7 @@ Esperar 5-10 minutos mientras instala todo.
 ### Paso 5: Verificar
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:8545/health
 ```
 
 Deberías ver: `{"status":"ok",...}`
@@ -56,7 +69,7 @@ Deberías ver: `{"status":"ok",...}`
 ### Paso 6: Probar
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "TU-TICKET-123"}'
 ```
@@ -94,7 +107,7 @@ docker-compose logs -f
 ### Paso 5: Probar
 
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:8545/health
 ```
 
 ---
@@ -106,7 +119,7 @@ curl http://localhost:3000/health
 3. Configurar:
    - **Name**: QA Agent Auto-Test
    - **Status**: Enabled
-   - **URL**: `http://YOUR-SERVER-IP:3000/api/webhook/jira`
+   - **URL**: `http://YOUR-SERVER-IP:8545/api/webhook/jira`
    - **Events**: Issue → updated
    - **JQL**: `status = "Ready for QA"`
 4. Save
@@ -120,7 +133,7 @@ Ahora los tests se ejecutan automáticamente cuando un ticket pase a "Ready for 
 ### Testear un ticket manualmente
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 ```
@@ -129,13 +142,13 @@ curl -X POST http://localhost:3000/api/test-ticket \
 
 ```bash
 # Respuesta del comando anterior incluye jobId
-curl http://localhost:3000/api/job-status/JOB-ID
+curl http://localhost:8545/api/job-status/JOB-ID
 ```
 
 ### Ver todos los jobs
 
 ```bash
-curl http://localhost:3000/api/jobs | jq .
+curl http://localhost:8545/api/jobs | jq .
 ```
 
 ---

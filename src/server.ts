@@ -1,42 +1,49 @@
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
+import fs from 'fs';
 import dotenv from 'dotenv';
 import { testQueue } from './queue';
 import { logger } from './utils/logger';
-import { JiraClient } from './clients/jira-client';
 import { z } from 'zod';
+import { getDb, createTestRun, updateTestRun } from './db';
+import apiRouter from './routes/api';
 
 dotenv.config();
+getDb();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8545;
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
-// Health check
-app.get('/health', (req, res) => {
+app.get('/health', (_req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Main endpoint: Test a Jira ticket
+app.use('/api', apiRouter);
+
+// Legacy endpoint: Test a Jira ticket (no project)
 app.post('/api/test-ticket', async (req, res) => {
   try {
-    const schema = z.object({
-      ticketId: z.string().optional(),
-      ticketUrl: z.string().url().optional(),
-    }).refine(data => data.ticketId || data.ticketUrl, {
-      message: "Either ticketId or ticketUrl must be provided"
-    });
+    const schema = z
+      .object({
+        ticketId: z.string().optional(),
+        ticketUrl: z.string().url().optional(),
+        projectId: z.number().optional(),
+      })
+      .refine((data) => data.ticketId || data.ticketUrl, {
+        message: 'Either ticketId or ticketUrl must be provided',
+      });
 
-    const { ticketId, ticketUrl } = schema.parse(req.body);
+    const { ticketId, ticketUrl, projectId } = schema.parse(req.body);
 
-    // Extract ticket ID from URL if provided
     let finalTicketId = ticketId;
     if (ticketUrl && !ticketId) {
-      const match = ticketUrl.match(/[A-Z]+-\d+/);
+      const match = ticketUrl.match(/[A-Z][A-Z0-9]+-\d+/i);
       if (match) {
-        finalTicketId = match[0];
+        finalTicketId = match[0].toUpperCase();
       } else {
         return res.status(400).json({ error: 'Invalid Jira URL format' });
       }
@@ -48,21 +55,32 @@ app.post('/api/test-ticket', async (req, res) => {
 
     logger.info(`Received test request for ticket: ${finalTicketId}`);
 
-    // Enqueue the test job
+    const run = createTestRun({
+      project_id: projectId ?? null,
+      source: 'jira',
+      ticket_id: finalTicketId,
+      status: 'queued',
+    });
+
     const job = await testQueue.add('test-ticket', {
       ticketId: finalTicketId,
+      projectId: projectId ?? null,
+      runId: run.id,
+      source: 'jira',
       timestamp: Date.now(),
-      requestedBy: req.ip || 'unknown'
+      requestedBy: req.ip || 'unknown',
     });
+
+    updateTestRun(run.id, { job_id: String(job.id) });
 
     res.json({
       success: true,
       jobId: job.id,
+      runId: run.id,
       ticketId: finalTicketId,
       message: 'Test job queued successfully',
-      status: 'Check job status at /api/job-status/:jobId'
+      status: 'Check job status at /api/job-status/:jobId',
     });
-
   } catch (error) {
     logger.error('Error in /api/test-ticket:', error);
     if (error instanceof z.ZodError) {
@@ -72,7 +90,6 @@ app.post('/api/test-ticket', async (req, res) => {
   }
 });
 
-// Get job status
 app.get('/api/job-status/:jobId', async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -94,25 +111,23 @@ app.get('/api/job-status/:jobId', async (req, res) => {
       createdAt: job.timestamp,
       processedOn: job.processedOn,
       finishedOn: job.finishedOn,
-      failedReason: job.failedReason
+      failedReason: job.failedReason,
     });
-
   } catch (error) {
     logger.error('Error getting job status:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// List recent jobs
 app.get('/api/jobs', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 20;
-    
+
     const [completed, failed, active, waiting] = await Promise.all([
       testQueue.getCompleted(0, limit),
       testQueue.getFailed(0, limit),
       testQueue.getActive(0, limit),
-      testQueue.getWaiting(0, limit)
+      testQueue.getWaiting(0, limit),
     ]);
 
     res.json({
@@ -121,11 +136,11 @@ app.get('/api/jobs', async (req, res) => {
       active: active.length,
       waiting: waiting.length,
       jobs: {
-        completed: await Promise.all(completed.map(j => formatJob(j))),
-        failed: await Promise.all(failed.map(j => formatJob(j))),
-        active: await Promise.all(active.map(j => formatJob(j))),
-        waiting: await Promise.all(waiting.map(j => formatJob(j)))
-      }
+        completed: await Promise.all(completed.map((j) => formatJob(j))),
+        failed: await Promise.all(failed.map((j) => formatJob(j))),
+        active: await Promise.all(active.map((j) => formatJob(j))),
+        waiting: await Promise.all(waiting.map((j) => formatJob(j))),
+      },
     });
   } catch (error) {
     logger.error('Error listing jobs:', error);
@@ -141,34 +156,42 @@ async function formatJob(job: any) {
     state,
     progress: job.progress(),
     createdAt: job.timestamp,
-    finishedOn: job.finishedOn
+    finishedOn: job.finishedOn,
   };
 }
 
-// Webhook endpoint for Jira (optional - auto-trigger on status change)
 app.post('/api/webhook/jira', async (req, res) => {
   try {
     const payload = req.body;
 
     logger.info('Received Jira webhook:', {
       event: payload.webhookEvent,
-      issueKey: payload.issue?.key
+      issueKey: payload.issue?.key,
     });
 
-    // Auto-trigger testing when ticket moves to "Ready for QA"
     if (payload.webhookEvent === 'jira:issue_updated') {
       const issue = payload.issue;
       const statusName = issue.fields?.status?.name;
 
       if (statusName === 'Ready for QA' || statusName === 'QA') {
         logger.info(`Auto-triggering test for ${issue.key} (status: ${statusName})`);
-        
-        await testQueue.add('test-ticket', {
+
+        const run = createTestRun({
+          source: 'jira',
+          ticket_id: issue.key,
+          status: 'queued',
+        });
+
+        const job = await testQueue.add('test-ticket', {
           ticketId: issue.key,
+          runId: run.id,
+          source: 'jira',
           timestamp: Date.now(),
           requestedBy: 'webhook-auto',
-          triggeredBy: `status_change:${statusName}`
+          triggeredBy: `status_change:${statusName}`,
         });
+
+        updateTestRun(run.id, { job_id: String(job.id) });
       }
     }
 
@@ -179,14 +202,50 @@ app.post('/api/webhook/jira', async (req, res) => {
   }
 });
 
-// Start server
+const publicDir = path.join(process.cwd(), 'public');
+const screenshotsDir = path.resolve(
+  process.env.SCREENSHOTS_DIR || './screenshots'
+);
+fs.mkdirSync(screenshotsDir, { recursive: true });
+app.use('/screenshots', express.static(screenshotsDir));
+app.use(express.static(publicDir));
+app.get(/^(?!\/api(?:\/|$)|\/health$|\/screenshots(?:\/|$)).*/, (_req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'), (err) => {
+    if (err) {
+      res.status(404).send('UI not built yet. Run npm run build:web');
+    }
+  });
+});
+
 app.listen(PORT, () => {
   logger.info(`QA Agent server running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  logger.info(`Jira URL: ${process.env.JIRA_URL}`);
+  logger.info(`Jira URL: ${process.env.JIRA_URL || '(not set)'}`);
+
+  const setupMarker = path.join(process.cwd(), 'data', '.setup-complete');
+  if (!fs.existsSync(setupMarker)) {
+    logger.warn(
+      'Setup inicial pendiente. Corré `npm run setup` para Playwright, MCP y plugins.'
+    );
+  } else {
+    try {
+      // Soft check: Playwright browser missing → tests UI van a fallar
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { chromium } = require('playwright') as typeof import('playwright');
+      const exe = chromium.executablePath();
+      if (!exe || !fs.existsSync(exe)) {
+        logger.warn(
+          'Playwright Chromium no está instalado. Corré `npx playwright install chromium` o `npm run setup`.'
+        );
+      }
+    } catch {
+      logger.warn(
+        'No se pudo verificar Playwright. Corré `npm run setup` si los tests UI fallan.'
+      );
+    }
+  }
 });
 
-// Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM signal received: closing HTTP server');
   await testQueue.close();

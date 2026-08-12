@@ -10,10 +10,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
-  Tool
+  Tool,
 } from '@modelcontextprotocol/sdk/types.js';
 import axios, { AxiosInstance } from 'axios';
-import { z } from 'zod';
+import FormData from 'form-data';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -45,9 +45,12 @@ class JiraClient {
   }
 
   async searchIssues(jql: string, maxResults: number = 50) {
-    const response = await this.client.get(
-      `/search?jql=${encodeURIComponent(jql)}&maxResults=${maxResults}`
-    );
+    // Old GET /search returns 410 on Jira Cloud; use enhanced search/jql
+    const response = await this.client.post('/search/jql', {
+      jql,
+      maxResults,
+      fields: ['summary', 'status', 'issuetype', 'priority', 'updated'],
+    });
     return response.data;
   }
 
@@ -60,7 +63,6 @@ class JiraClient {
   }
 
   async uploadAttachment(issueKey: string, filename: string, content: Buffer) {
-    const FormData = (await import('form-data')).default;
     const form = new FormData();
     form.append('file', content, {
       filename,

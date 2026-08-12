@@ -1,5 +1,9 @@
 node_modules/
 dist/
+public/
+web/node_modules/
+web/dist/
+data/
 screenshots/
 logs/
 .env
@@ -7,3 +11,5 @@ logs/
 .DS_Store
 coverage/
 *.local
+*.db
+*.db-*

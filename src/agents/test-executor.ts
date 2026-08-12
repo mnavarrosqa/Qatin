@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs/promises';
 import { logger } from '../utils/logger';
 import { TestStrategy, TestScenario } from './ticket-analyzer';
+import { getRuntimePlugins, RuntimePlugins } from '../plugins';
 
 export interface ExecutionResult {
   success: boolean;
@@ -20,6 +21,7 @@ export interface StepResult {
   duration: number;
   error?: string;
   screenshot?: string;
+  retries?: number;
 }
 
 export interface Screenshot {
@@ -36,20 +38,45 @@ export interface Annotation {
   y: number;
 }
 
+export interface ExecutorConfig {
+  baseUrl?: string;
+  testUserEmail?: string | null;
+  testUserPassword?: string | null;
+  plugins?: RuntimePlugins;
+}
+
 export class TestExecutor {
   private browser: Browser | null = null;
   private screenshotsDir: string;
   private baseUrl: string;
+  private testUserEmail: string | null;
+  private testUserPassword: string | null;
+  private plugins: RuntimePlugins;
 
-  constructor() {
+  constructor(config?: ExecutorConfig) {
     this.screenshotsDir = process.env.SCREENSHOTS_DIR || './screenshots';
-    this.baseUrl = process.env.APP_BASE_URL || 'https://example.com';
-    logger.info('TestExecutor initialized');
+    this.baseUrl =
+      config?.baseUrl || process.env.APP_BASE_URL || 'https://example.com';
+    this.testUserEmail =
+      config?.testUserEmail ?? process.env.TEST_USER_EMAIL ?? null;
+    this.testUserPassword =
+      config?.testUserPassword ?? process.env.TEST_USER_PASSWORD ?? null;
+    this.plugins = config?.plugins ?? getRuntimePlugins();
+    logger.info('TestExecutor initialized', {
+      baseUrl: this.baseUrl,
+      plugins: this.plugins,
+    });
   }
 
-  /**
-   * Execute all test scenarios
-   */
+  withConfig(config: ExecutorConfig): TestExecutor {
+    return new TestExecutor({
+      baseUrl: config.baseUrl ?? this.baseUrl,
+      testUserEmail: config.testUserEmail ?? this.testUserEmail,
+      testUserPassword: config.testUserPassword ?? this.testUserPassword,
+      plugins: config.plugins ?? this.plugins,
+    });
+  }
+
   async executeTests(
     ticketId: string,
     strategy: TestStrategy
@@ -57,14 +84,11 @@ export class TestExecutor {
     const results: ExecutionResult[] = [];
 
     try {
-      // Launch browser
       await this.launchBrowser();
 
-      // Create screenshots directory for this ticket
       const ticketScreenshotsDir = path.join(this.screenshotsDir, ticketId);
       await fs.mkdir(ticketScreenshotsDir, { recursive: true });
 
-      // Execute each scenario
       for (const scenario of strategy.scenarios) {
         logger.info(`Executing scenario: ${scenario.id}`);
         const result = await this.executeScenario(
@@ -74,7 +98,6 @@ export class TestExecutor {
         );
         results.push(result);
       }
-
     } catch (error: any) {
       logger.error('Error executing tests:', error);
       throw error;
@@ -85,9 +108,6 @@ export class TestExecutor {
     return results;
   }
 
-  /**
-   * Execute a single test scenario
-   */
   private async executeScenario(
     ticketId: string,
     scenario: TestScenario,
@@ -102,21 +122,18 @@ export class TestExecutor {
     let page: Page | null = null;
 
     try {
-      // Create new context for isolation
       context = await this.browser!.newContext({
         viewport: { width: 1920, height: 1080 },
         userAgent: 'Mozilla/5.0 (QA Bot) Playwright/1.40',
-        recordVideo: undefined // Can enable if needed
+        recordVideo: undefined,
       });
 
       page = await context.newPage();
 
-      // Set default timeout
       page.setDefaultTimeout(
         parseInt(process.env.BROWSER_TIMEOUT || '30000')
       );
 
-      // Listen for console errors
       const consoleErrors: string[] = [];
       page.on('console', (msg) => {
         if (msg.type() === 'error') {
@@ -124,12 +141,25 @@ export class TestExecutor {
         }
       });
 
-      // Listen for page errors
       page.on('pageerror', (error) => {
         errors.push(`Page error: ${error.message}`);
       });
 
-      // Execute each step
+      const networkErrors: string[] = [];
+      if (this.plugins.networkGuard) {
+        page.on('response', (response) => {
+          const status = response.status();
+          if (status >= 400) {
+            const url = response.url();
+            // Ignore common noise (analytics, favicon)
+            if (/favicon|google-analytics|googletagmanager|hotjar/i.test(url)) {
+              return;
+            }
+            networkErrors.push(`${status} ${response.request().method()} ${url}`);
+          }
+        });
+      }
+
       for (let i = 0; i < scenario.steps.length; i++) {
         const step = scenario.steps[i];
         const stepStartTime = Date.now();
@@ -137,56 +167,62 @@ export class TestExecutor {
         try {
           logger.info(`Step ${i + 1}: ${step}`);
 
-          await this.executeStep(page, step, scenario);
+          const retriesUsed = await this.executeStepWithPlugins(
+            page,
+            step,
+            scenario
+          );
 
-          // Take screenshot after each step
           const screenshotName = `${scenario.id}-step-${i + 1}.png`;
           const screenshotPath = path.join(screenshotsDir, screenshotName);
-          
+
           const screenshotBuffer = await page.screenshot({
             path: screenshotPath,
-            fullPage: true
+            fullPage: true,
           });
 
           screenshots.push({
             name: screenshotName,
             path: screenshotPath,
-            buffer: screenshotBuffer
+            buffer: screenshotBuffer,
           });
 
           stepResults.push({
             step,
             success: true,
             duration: Date.now() - stepStartTime,
-            screenshot: screenshotName
+            screenshot: screenshotName,
+            ...(retriesUsed > 0 ? { retries: retriesUsed } : {}),
           });
 
-          // Wait a bit for UI to stabilize
           await page.waitForTimeout(500);
-
         } catch (error: any) {
           logger.error(`Step failed: ${step}`, error.message);
 
-          // Take error screenshot
           const errorScreenshotName = `${scenario.id}-step-${i + 1}-ERROR.png`;
-          const errorScreenshotPath = path.join(screenshotsDir, errorScreenshotName);
-          
+          const errorScreenshotPath = path.join(
+            screenshotsDir,
+            errorScreenshotName
+          );
+
           try {
             const errorBuffer = await page.screenshot({
               path: errorScreenshotPath,
-              fullPage: true
+              fullPage: true,
             });
 
             screenshots.push({
               name: errorScreenshotName,
               path: errorScreenshotPath,
               buffer: errorBuffer,
-              annotations: [{
-                type: 'error',
-                text: error.message,
-                x: 50,
-                y: 50
-              }]
+              annotations: [
+                {
+                  type: 'error',
+                  text: error.message,
+                  x: 50,
+                  y: 50,
+                },
+              ],
             });
           } catch (screenshotError) {
             logger.error('Failed to take error screenshot:', screenshotError);
@@ -197,19 +233,23 @@ export class TestExecutor {
             success: false,
             duration: Date.now() - stepStartTime,
             error: error.message,
-            screenshot: errorScreenshotName
+            screenshot: errorScreenshotName,
           });
 
           errors.push(`Step ${i + 1} failed: ${error.message}`);
         }
       }
 
-      // Check for console errors
       if (consoleErrors.length > 0) {
         errors.push(`Console errors: ${consoleErrors.join(', ')}`);
       }
 
-      const success = stepResults.every(r => r.success) && errors.length === 0;
+      if (this.plugins.networkGuard && networkErrors.length > 0) {
+        const unique = [...new Set(networkErrors)].slice(0, 10);
+        errors.push(`Network errors: ${unique.join('; ')}`);
+      }
+
+      const success = stepResults.every((r) => r.success) && errors.length === 0;
 
       return {
         success,
@@ -218,9 +258,8 @@ export class TestExecutor {
         steps: stepResults,
         screenshots,
         errors,
-        duration: Date.now() - startTime
+        duration: Date.now() - startTime,
       };
-
     } catch (error: any) {
       logger.error('Scenario execution failed:', error);
       errors.push(`Scenario failed: ${error.message}`);
@@ -232,9 +271,8 @@ export class TestExecutor {
         steps: stepResults,
         screenshots,
         errors,
-        duration: Date.now() - startTime
+        duration: Date.now() - startTime,
       };
-
     } finally {
       if (context) {
         await context.close();
@@ -242,20 +280,47 @@ export class TestExecutor {
     }
   }
 
-  /**
-   * Execute a single step
-   */
+  /** Returns number of retries used after the first attempt. */
+  private async executeStepWithPlugins(
+    page: Page,
+    step: string,
+    scenario: TestScenario
+  ): Promise<number> {
+    const maxExtra = this.plugins.flakyRetry
+      ? this.plugins.flakyMaxRetries
+      : 0;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt <= maxExtra; attempt++) {
+      try {
+        await this.executeStep(page, step, scenario);
+        if (attempt > 0) {
+          logger.info(`Step recovered after ${attempt} flaky retries`);
+        }
+        return attempt;
+      } catch (err: any) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < maxExtra) {
+          const delay = 500 * (attempt + 1);
+          logger.warn(
+            `Flaky retry ${attempt + 1}/${maxExtra} after ${delay}ms: ${lastError.message}`
+          );
+          await page.waitForTimeout(delay);
+        }
+      }
+    }
+
+    throw lastError || new Error('Step failed');
+  }
+
   private async executeStep(
     page: Page,
     step: string,
     scenario: TestScenario
   ): Promise<void> {
     const stepLower = step.toLowerCase();
-
-    // Replace placeholders
     const processedStep = step.replace(/\{\{BASE_URL\}\}/g, this.baseUrl);
 
-    // Navigate
     if (stepLower.includes('navigate') || stepLower.includes('go to')) {
       const urlMatch = processedStep.match(/(https?:\/\/[^\s]+)/);
       if (urlMatch) {
@@ -264,135 +329,256 @@ export class TestExecutor {
       return;
     }
 
-    // Click
     if (stepLower.includes('click')) {
-      const selector = this.extractSelector(processedStep, scenario);
-      if (selector) {
-        await page.click(selector);
-      } else {
-        // Try to find button by text
-        const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
-        if (textMatch) {
-          await page.click(`text=${textMatch[1]}`);
+      await this.withSelectorAction(
+        page,
+        processedStep,
+        scenario,
+        async (selector) => {
+          await page.click(selector);
+        },
+        async () => {
+          const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
+          if (textMatch) {
+            await page.click(`text=${textMatch[1]}`);
+            return true;
+          }
+          return false;
         }
-      }
+      );
       return;
     }
 
-    // Fill / Type
-    if (stepLower.includes('fill') || stepLower.includes('type') || stepLower.includes('enter')) {
-      const selector = this.extractSelector(processedStep, scenario);
-      const valueMatch = processedStep.match(/with\s+['"]?([^'"]+)['"]?/i) ||
-                        processedStep.match(/['"]([^'"]+)['"]/);
-      
-      if (selector && valueMatch) {
-        await page.fill(selector, valueMatch[1]);
-      }
+    if (
+      stepLower.includes('fill') ||
+      stepLower.includes('type') ||
+      stepLower.includes('enter')
+    ) {
+      let valueMatch =
+        processedStep.match(/with\s+['"]?([^'"]+)['"]?/i) ||
+        processedStep.match(/['"]([^'"]+)['"]/);
+
+      await this.withSelectorAction(
+        page,
+        processedStep,
+        scenario,
+        async (selector) => {
+          let value = valueMatch?.[1];
+          if (!value) {
+            if (selector.toLowerCase().includes('email') && this.testUserEmail) {
+              value = this.testUserEmail;
+            } else if (
+              selector.toLowerCase().includes('password') &&
+              this.testUserPassword
+            ) {
+              value = this.testUserPassword;
+            }
+          }
+          if (!value) {
+            throw new Error('No value to fill');
+          }
+          await page.fill(selector, value);
+        }
+      );
       return;
     }
 
-    // Wait
     if (stepLower.includes('wait')) {
-      const timeMatch = processedStep.match(/(\d+)\s*(seconds?|ms|milliseconds?)/);
+      const timeMatch = processedStep.match(
+        /(\d+)\s*(seconds?|ms|milliseconds?)/
+      );
       if (timeMatch) {
         const time = parseInt(timeMatch[1]);
         const unit = timeMatch[2];
         const ms = unit.includes('second') ? time * 1000 : time;
         await page.waitForTimeout(ms);
       } else {
-        await page.waitForTimeout(2000); // Default 2s
+        await page.waitForTimeout(2000);
       }
       return;
     }
 
-    // Check / Verify
-    if (stepLower.includes('check') || stepLower.includes('verify') || stepLower.includes('assert')) {
-      const selector = this.extractSelector(processedStep, scenario);
-      if (selector) {
-        await page.waitForSelector(selector, { timeout: 5000 });
-      } else {
-        // Try to verify text
-        const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
-        if (textMatch) {
-          await page.waitForSelector(`text=${textMatch[1]}`, { timeout: 5000 });
+    if (
+      stepLower.includes('check') ||
+      stepLower.includes('verify') ||
+      stepLower.includes('assert')
+    ) {
+      await this.withSelectorAction(
+        page,
+        processedStep,
+        scenario,
+        async (selector) => {
+          await page.waitForSelector(selector, { timeout: 5000 });
+        },
+        async () => {
+          const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
+          if (textMatch) {
+            await page.waitForSelector(`text=${textMatch[1]}`, {
+              timeout: 5000,
+            });
+            return true;
+          }
+          return false;
         }
-      }
+      );
       return;
     }
 
-    // Scroll
     if (stepLower.includes('scroll')) {
       if (stepLower.includes('bottom')) {
-        await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+        await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
       } else if (stepLower.includes('top')) {
-        await page.evaluate(() => window.scrollTo(0, 0));
+        await page.evaluate('window.scrollTo(0, 0)');
       } else {
-        await page.evaluate(() => window.scrollBy(0, 500));
+        await page.evaluate('window.scrollBy(0, 500)');
       }
       return;
     }
 
-    // Hover
     if (stepLower.includes('hover')) {
-      const selector = this.extractSelector(processedStep, scenario);
-      if (selector) {
-        await page.hover(selector);
-      }
+      await this.withSelectorAction(
+        page,
+        processedStep,
+        scenario,
+        async (selector) => {
+          await page.hover(selector);
+        }
+      );
       return;
     }
 
-    // Select
     if (stepLower.includes('select')) {
-      const selector = this.extractSelector(processedStep, scenario);
       const valueMatch = processedStep.match(/['"]([^'"]+)['"]/);
-      if (selector && valueMatch) {
-        await page.selectOption(selector, valueMatch[1]);
-      }
+      await this.withSelectorAction(
+        page,
+        processedStep,
+        scenario,
+        async (selector) => {
+          if (!valueMatch) throw new Error('No select value');
+          await page.selectOption(selector, valueMatch[1]);
+        }
+      );
       return;
     }
 
-    // Generic: just wait a bit
     logger.warn(`Unknown step action: ${step}, waiting 1s`);
     await page.waitForTimeout(1000);
   }
 
-  /**
-   * Extract CSS selector from step text or scenario
-   */
+  private async withSelectorAction(
+    page: Page,
+    step: string,
+    scenario: TestScenario,
+    action: (selector: string) => Promise<void>,
+    fallback?: () => Promise<boolean>
+  ): Promise<void> {
+    const candidates = this.selectorCandidates(step, scenario);
+    let lastError: Error | null = null;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const selector = candidates[i];
+      try {
+        await action(selector);
+        if (i > 0 && this.plugins.selfHeal) {
+          logger.info(`Self-heal used alternate selector: ${selector}`);
+        }
+        return;
+      } catch (err: any) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        if (!this.plugins.selfHeal || i === candidates.length - 1) {
+          break;
+        }
+        logger.warn(
+          `Self-heal: selector failed (${selector}), trying next…`
+        );
+      }
+    }
+
+    if (fallback) {
+      const ok = await fallback();
+      if (ok) return;
+    }
+
+    throw lastError || new Error('No matching selector');
+  }
+
+  private selectorCandidates(step: string, scenario: TestScenario): string[] {
+    const primary = this.extractSelector(step, scenario);
+    const out: string[] = [];
+    const push = (s: string | null | undefined) => {
+      if (s && !out.includes(s)) out.push(s);
+    };
+
+    push(primary);
+
+    if (this.plugins.selfHeal) {
+      for (const s of scenario.selectors || []) {
+        push(s);
+      }
+
+      const textMatch = step.match(/['"]([^'"]+)['"]/);
+      if (textMatch) {
+        const t = textMatch[1];
+        push(`text=${t}`);
+        push(`button:has-text("${t}")`);
+        push(`[aria-label="${t}"]`);
+      }
+
+      const keywords = [
+        'email',
+        'password',
+        'submit',
+        'login',
+        'search',
+        'username',
+        'name',
+      ];
+      for (const kw of keywords) {
+        if (step.toLowerCase().includes(kw)) {
+          push(`[data-testid*="${kw}"]`);
+          push(`[name*="${kw}"]`);
+          push(`[id*="${kw}"]`);
+          if (kw === 'email' || kw === 'password') {
+            push(`input[type="${kw}"]`);
+          }
+        }
+      }
+    }
+
+    return out.length ? out : primary ? [primary] : [];
+  }
+
   private extractSelector(step: string, scenario: TestScenario): string | null {
-    // Try to extract selector from step text
     const selectorMatch = step.match(/['"]([#.\[][^'"]+)['"]/);
     if (selectorMatch) {
       return selectorMatch[1];
     }
 
-    // Check if scenario has selectors
     if (scenario.selectors && scenario.selectors.length > 0) {
-      // Try to match keywords with selectors
       for (const selector of scenario.selectors) {
         const selectorKeywords = selector.toLowerCase();
         const stepKeywords = step.toLowerCase();
-        
+
         if (
-          (stepKeywords.includes('email') && selectorKeywords.includes('email')) ||
-          (stepKeywords.includes('password') && selectorKeywords.includes('password')) ||
-          (stepKeywords.includes('submit') && selectorKeywords.includes('submit')) ||
-          (stepKeywords.includes('button') && selectorKeywords.includes('button'))
+          (stepKeywords.includes('email') &&
+            selectorKeywords.includes('email')) ||
+          (stepKeywords.includes('password') &&
+            selectorKeywords.includes('password')) ||
+          (stepKeywords.includes('submit') &&
+            selectorKeywords.includes('submit')) ||
+          (stepKeywords.includes('button') &&
+            selectorKeywords.includes('button'))
         ) {
           return selector;
         }
       }
-      
-      // Return first selector as fallback
+
       return scenario.selectors[0];
     }
 
     return null;
   }
 
-  /**
-   * Launch browser
-   */
   private async launchBrowser(): Promise<void> {
     if (this.browser) return;
 
@@ -404,16 +590,13 @@ export class TestExecutor {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
+        '--disable-gpu',
+      ],
     });
 
     logger.info(`Browser launched (headless: ${headless})`);
   }
 
-  /**
-   * Close browser
-   */
   private async closeBrowser(): Promise<void> {
     if (this.browser) {
       await this.browser.close();
@@ -422,9 +605,6 @@ export class TestExecutor {
     }
   }
 
-  /**
-   * Get summary of execution results
-   */
   static getSummary(results: ExecutionResult[]): {
     passed: boolean;
     total: number;
@@ -433,7 +613,7 @@ export class TestExecutor {
     totalDuration: number;
   } {
     const total = results.length;
-    const successful = results.filter(r => r.success).length;
+    const successful = results.filter((r) => r.success).length;
     const failed = total - successful;
     const totalDuration = results.reduce((sum, r) => sum + r.duration, 0);
 
@@ -442,7 +622,7 @@ export class TestExecutor {
       total,
       successful,
       failed,
-      totalDuration
+      totalDuration,
     };
   }
 }

@@ -185,8 +185,8 @@ echo -e "${GREEN}✓ $AVAILABLE available${NC}"
 
 # Check 10: Ports
 echo "10. Checking ports..."
-echo -n "   - Port 3000 (API)... "
-if lsof -Pi :3000 -sTCP:LISTEN -t >/dev/null 2>&1; then
+echo -n "   - Port 8545 (API)... "
+if lsof -Pi :8545 -sTCP:LISTEN -t >/dev/null 2>&1; then
     echo -e "${YELLOW}⚠ Already in use${NC}"
     WARNINGS=$((WARNINGS + 1))
 else

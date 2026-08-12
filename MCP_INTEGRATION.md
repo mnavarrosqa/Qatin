@@ -226,7 +226,7 @@ cd /agent
 npm run dev
 
 # En otra terminal
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 

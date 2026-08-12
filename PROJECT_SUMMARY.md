@@ -57,10 +57,10 @@ nano .env  # Editar con tus keys
 sudo ./deploy.sh
 
 # 3. Verificar
-curl http://localhost:3000/health
+curl http://localhost:8545/health
 
 # 4. Probar
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "PROJ-123"}'
 ```
@@ -208,7 +208,7 @@ Acceptance Criteria:
 ### 2. Trigger Test
 
 ```bash
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "USER-123"}'
 ```
@@ -324,7 +324,7 @@ $ ./scripts/check-status.sh
   Worker 3: ✅ Running
 🔴 Redis Status: ✅ Running
 
-$ curl http://localhost:3000/health
+$ curl http://localhost:8545/health
 {"status":"ok","timestamp":"2024-01-15T10:30:00.000Z"}
 ```
 

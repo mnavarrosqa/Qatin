@@ -120,10 +120,10 @@ APP_BASE_URL=https://tu-app.com
 
 ```bash
 # Health check
-curl http://localhost:3000/health
+curl http://localhost:8545/health
 
 # Testear un ticket
-curl -X POST http://localhost:3000/api/test-ticket \
+curl -X POST http://localhost:8545/api/test-ticket \
   -H "Content-Type: application/json" \
   -d '{"ticketId": "TU-TICKET-123"}'
 
