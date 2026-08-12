@@ -215,10 +215,8 @@ function isRunEnqueueIntent(text: string): boolean {
   ) {
     return false;
   }
-  return (
-    /\b(lanz[aeá]|ejecut\w*|encol\w*|correr|corr[eé]|re-?ejecut\w*|nueva ejecuci[oó]n|enqueue|run (the )?tests)\b/i.test(
-      t
-    ) || /\bplaywright\b/.test(t)
+  return /\b(lanz[aeá]|ejecut\w*|encol\w*|correr|corr[eé]|re-?ejecut\w*|nueva ejecuci[oó]n|enqueue|run (the )?tests)\b/i.test(
+    t
   );
 }
 
@@ -422,6 +420,8 @@ export async function runQaChatTurn(opts: {
   let finalText = '';
   let usageAcc = emptyUsage();
   let llmMs = 0;
+  let calledEnqueueRun = false;
+  let enqueueFallbackUsed = false;
   onEvent({ type: 'progress', detail: 'Consultando al modelo…' });
 
   const emitStopped = () => {
@@ -523,6 +523,9 @@ export async function runQaChatTurn(opts: {
           }
 
           const call = response.tool_calls[ti];
+          if (call.function.name === 'enqueue_run') {
+            calledEnqueueRun = true;
+          }
           const result = await tools.run(
             call.function.name,
             call.function.arguments || '{}'
@@ -566,6 +569,51 @@ export async function runQaChatTurn(opts: {
       finalText =
         response.content?.trim() ||
         'Listo. ¿Querés que analice otro ticket o que ejecute tests?';
+
+      const wantsEnqueue = isRunEnqueueIntent(userMessage);
+      const fabricated =
+        !calledEnqueueRun && claimsFabricatedRun(finalText);
+
+      if (
+        !calledEnqueueRun &&
+        !enqueueFallbackUsed &&
+        (wantsEnqueue || fabricated)
+      ) {
+        enqueueFallbackUsed = true;
+        const ticketId = resolveTicketForEnqueue(sessionId, userMessage);
+        if (!ticketId) {
+          finalText =
+            'Para encolar la ejecución necesito el ticket (por ejemplo AGDCF-4790). Decime la clave o pegá el link de Jira.';
+          logger.warn('QaChatAgent blocked fabricated/missing enqueue', {
+            sessionId,
+            wantsEnqueue,
+            fabricated,
+          });
+        } else {
+          logger.warn('QaChatAgent forcing enqueue_run after model skipped tool', {
+            sessionId,
+            ticketId,
+            wantsEnqueue,
+            fabricated,
+          });
+          const result = (await tools.run(
+            'enqueue_run',
+            JSON.stringify({ ticket_id: ticketId })
+          )) as Record<string, unknown>;
+          calledEnqueueRun = true;
+          finalText = formatEnqueueReply(result);
+        }
+
+        const usage = toTurnUsage(usageAcc, llmMs);
+        createChatMessage({
+          session_id: sessionId,
+          role: 'assistant',
+          content: finalText,
+          ...(usage ? { meta: { usage, forcedEnqueue: true } } : { meta: { forcedEnqueue: true } }),
+        });
+        onEvent({ type: 'token', text: finalText });
+        break;
+      }
 
       const usage = toTurnUsage(usageAcc, llmMs);
       createChatMessage({

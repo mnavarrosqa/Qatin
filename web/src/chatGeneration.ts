@@ -254,7 +254,7 @@ export async function startChatGeneration(opts: {
         } else if (ev.type === 'done') {
           updateAssistant(assistantId, (m) => ({
             ...m,
-            content: m.content || ev.message || m.content,
+            content: ev.message?.trim() ? ev.message : m.content || ev.message,
             tools: settleTools(m.tools, { dropProgress: true }),
             usage: ev.usage || m.usage,
           }));
