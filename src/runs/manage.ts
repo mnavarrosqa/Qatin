@@ -8,7 +8,7 @@ import {
   type TestRunRow,
 } from '../db';
 import { testQueue } from '../queue';
-import { getScreenshotsDir } from '../paths';
+import { getScreenshotsDir, isPathInside } from '../paths';
 import { logger } from '../utils/logger';
 
 export class RunCancelledError extends Error {
@@ -21,15 +21,54 @@ export class RunCancelledError extends Error {
 export function isRunCancelled(runId?: number | null): boolean {
   if (!runId) return false;
   const run = getTestRun(runId);
-  return Boolean(
-    run && (run.status === 'cancelled' || run.phase === 'cancelled')
-  );
+  // Missing row (deleted while active) must stop the worker.
+  if (!run) return true;
+  return run.status === 'cancelled' || run.phase === 'cancelled';
 }
 
 export function assertRunNotCancelled(runId?: number | null): void {
   if (isRunCancelled(runId)) {
     throw new RunCancelledError();
   }
+}
+
+/**
+ * Atomically mark a run completed/failed. No-ops if already cancelled/deleted
+ * so a late worker finish cannot overwrite a user cancel.
+ */
+export function finalizeTestRun(
+  id: number,
+  outcome: 'completed' | 'failed',
+  patch: { result_json: string; ticket_id?: string }
+): 'ok' | 'cancelled' | 'missing' {
+  const result = getDb()
+    .prepare(
+      `UPDATE test_runs SET
+         status = ?,
+         phase = ?,
+         result_json = ?,
+         ticket_id = COALESCE(?, ticket_id),
+         updated_at = datetime('now')
+       WHERE id = ?
+         AND status NOT IN ('cancelled', 'completed', 'failed')
+         AND IFNULL(phase, '') != 'cancelled'`
+    )
+    .run(
+      outcome,
+      outcome,
+      patch.result_json,
+      patch.ticket_id ?? null,
+      id
+    );
+
+  if (result.changes > 0) return 'ok';
+
+  const run = getTestRun(id);
+  if (!run) return 'missing';
+  if (run.status === 'cancelled' || run.phase === 'cancelled') {
+    return 'cancelled';
+  }
+  return 'ok';
 }
 
 async function cancelQueueJob(jobId: string | null | undefined): Promise<void> {
@@ -117,9 +156,8 @@ export function deleteRunArtifacts(run: TestRunRow): void {
         screenshots?: Array<{ path?: string; name?: string }>;
       };
       for (const shot of result.screenshots || []) {
-        if (shot.path) {
-          const abs = path.resolve(shot.path);
-          if (abs.startsWith(screenshotsRoot)) unlinkQuiet(abs);
+        if (shot.path && isPathInside(screenshotsRoot, shot.path)) {
+          unlinkQuiet(path.resolve(shot.path));
         }
       }
     } catch {

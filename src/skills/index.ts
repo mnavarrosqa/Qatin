@@ -84,7 +84,7 @@ export function getInstalledSkillPlaybooks(): string {
     const auto = getAutoBeforeEnqueue();
     lines.push(
       auto
-        ? 'Skill Test plan reviewer (activo, auto): before enqueue_run, call review_test_plan unless the user explicitly says to enqueue anyway / "encolá igual".'
+        ? 'Skill Test plan reviewer (activo, auto): before enqueue_run, call review_test_plan unless the user explicitly asks to launch/run now (lanzá, ejecutá, encolá, nueva ejecución, encolá igual).'
         : 'Skill Test plan reviewer (activo): when the user asks to review the plan, call review_test_plan. Do not block enqueue unless they ask for a review.'
     );
   }

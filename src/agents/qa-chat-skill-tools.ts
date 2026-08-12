@@ -17,13 +17,13 @@ import {
   isSkillInstalled,
 } from '../skills';
 import { ToolDefinition } from '../llm';
-import { getScreenshotsDir } from '../paths';
+import { getScreenshotsDir, isPathInside } from '../paths';
 import { logger } from '../utils/logger';
 
 function screenshotPublicUrl(filePath: string): string {
   const screenshotsRoot = getScreenshotsDir();
   const abs = path.resolve(filePath);
-  if (abs.startsWith(screenshotsRoot)) {
+  if (isPathInside(screenshotsRoot, abs)) {
     const rel = path.relative(screenshotsRoot, abs).split(path.sep).join('/');
     return `/screenshots/${rel}`;
   }
@@ -398,10 +398,9 @@ async function suggestSelectors(
   const urlRaw = typeof args.url === 'string' ? args.url.trim() : '';
   const hint = typeof args.hint === 'string' ? args.hint.trim() : '';
   const base = project?.base_url || '';
-  const url = resolveUrl(urlRaw || base, base);
-  if (!url) {
-    return { error: 'Indicá url o configurá base_url del proyecto' };
-  }
+  const allowed = resolveProjectUrl(urlRaw || base, base);
+  if ('error' in allowed) return allowed;
+  const url = allowed.url;
 
   const browser = await chromium.launch({
     headless: process.env.HEADLESS !== 'false',
@@ -512,10 +511,9 @@ async function exploreApp(
   const project = getProject(projectId);
   const base = project?.base_url || '';
   const urlRaw = typeof args.url === 'string' ? args.url.trim() : '';
-  const startUrl = resolveUrl(urlRaw || base, base);
-  if (!startUrl) {
-    return { error: 'Indicá url o configurá base_url del proyecto' };
-  }
+  const allowed = resolveProjectUrl(urlRaw || base, base);
+  if ('error' in allowed) return allowed;
+  const startUrl = allowed.url;
 
   const maxPages = Math.min(
     15,
@@ -660,6 +658,35 @@ function resolveUrl(url: string, base: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** Resolve URL and require same origin as project base_url (SSRF guard). */
+function resolveProjectUrl(
+  url: string,
+  base: string
+): { url: string } | { error: string } {
+  if (!base) {
+    return {
+      error:
+        'Configurá base_url del proyecto. Las skills de browser solo pueden abrir URLs de ese origen.',
+    };
+  }
+  const resolved = resolveUrl(url, base);
+  if (!resolved) {
+    return { error: 'Indicá url o configurá base_url del proyecto' };
+  }
+  try {
+    const baseOrigin = new URL(base).origin;
+    const targetOrigin = new URL(resolved).origin;
+    if (baseOrigin !== targetOrigin) {
+      return {
+        error: `URL fuera del origen del proyecto (${baseOrigin}). Usá una ruta relativa o URL del mismo sitio.`,
+      };
+    }
+  } catch {
+    return { error: 'URL inválida' };
+  }
+  return { url: resolved };
 }
 
 function resolveFailedRun(

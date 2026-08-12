@@ -10,8 +10,6 @@ import { TestExecutor, ExecutionResult } from './agents/test-executor';
 import { logger } from './utils/logger';
 import {
   getDb,
-  updateTestRun,
-  getTestRun,
   getRunMemory,
   formatRunMemoryContext,
   saveRunMemory,
@@ -23,6 +21,7 @@ import {
 } from './runs/progress';
 import {
   assertRunNotCancelled,
+  finalizeTestRun,
   RunCancelledError,
 } from './runs/manage';import { LlmProvider } from './llm';
 import { isInstalled } from './plugins';
@@ -312,13 +311,14 @@ async function startWorker() {
       };
 
       if (runId) {
-        assertRunNotCancelled(runId);
-        updateTestRun(runId, {
-          status: 'completed',
-          phase: 'completed',
+        const fin = finalizeTestRun(runId, 'completed', {
           result_json: JSON.stringify(result),
           ticket_id: ticket.key,
         });
+        if (fin === 'cancelled' || fin === 'missing') {
+          logger.info(`[${label}] Job finished but run was cancelled/deleted`);
+          return { success: false, cancelled: true };
+        }
       }
 
       job.progress(100);
@@ -336,22 +336,16 @@ async function startWorker() {
       logger.error(`[${label}] Job failed:`, error);
 
       if (runId) {
-        const current = getTestRun(runId);
-        if (
-          current?.status === 'cancelled' ||
-          current?.phase === 'cancelled'
-        ) {
-          return { success: false, cancelled: true };
-        }
-        updateTestRun(runId, {
-          status: 'failed',
-          phase: 'failed',
+        const fin = finalizeTestRun(runId, 'failed', {
           result_json: JSON.stringify({
             success: false,
             error: error.message,
             stack: error.stack,
           }),
         });
+        if (fin === 'cancelled' || fin === 'missing') {
+          return { success: false, cancelled: true };
+        }
       }
 
       if (source === 'jira') {
@@ -384,12 +378,27 @@ function writeRunProgress(
   state: RunProgressState
 ): void {
   if (!runId) return;
-  assertRunNotCancelled(runId);
-  updateTestRun(runId, {
-    status: state.phase === 'queued' ? 'queued' : 'active',
-    phase: state.phase,
-    progress_json: progressPayload(state),
-  });
+  const result = getDb()
+    .prepare(
+      `UPDATE test_runs SET
+         status = ?,
+         phase = ?,
+         progress_json = ?,
+         updated_at = datetime('now')
+       WHERE id = ?
+         AND status NOT IN ('cancelled', 'completed', 'failed')
+         AND IFNULL(phase, '') != 'cancelled'`
+    )
+    .run(
+      state.phase === 'queued' ? 'queued' : 'active',
+      state.phase,
+      progressPayload(state),
+      runId
+    );
+  if (result.changes === 0) {
+    // Cancelled/deleted → stop; already terminal → ignore late progress.
+    assertRunNotCancelled(runId);
+  }
 }
 
 function saveEngramMemory(opts: {

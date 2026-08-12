@@ -92,6 +92,7 @@ export function RunsPage() {
   const [params, setParams] = useSearchParams();
   const [projects, setProjects] = useState<Project[]>([]);
   const [runs, setRuns] = useState<TestRun[]>([]);
+  const [runsLoaded, setRunsLoaded] = useState(false);
   const [detail, setDetail] = useState<TestRunDetail | null>(null);
   const [error, setError] = useState('');
   const [confirm, setConfirm] = useState<ConfirmAction | null>(null);
@@ -113,6 +114,7 @@ export function RunsPage() {
   }, []);
 
   useEffect(() => {
+    if (!runsLoaded) return;
     if (runs.length === 0) {
       if (selectedId) setParams({}, { replace: true });
       return;
@@ -120,29 +122,33 @@ export function RunsPage() {
     if (selectedId && runs.some((r) => r.id === selectedId)) return;
     const live = runs.find(isLive) || runs[0];
     setParams({ id: String(live.id) }, { replace: true });
-  }, [runs, selectedId, setParams]);
+  }, [runs, runsLoaded, selectedId, setParams]);
 
   useEffect(() => {
     if (typeof projectId !== 'number') {
       setRuns([]);
+      setRunsLoaded(false);
       setDetail(null);
       return;
     }
 
     let cancelled = false;
     let timer = 0;
+    setRunsLoaded(false);
 
     async function tick() {
       try {
         const res = await api.listRuns(50, projectId as number);
         if (cancelled) return;
         setRuns(res.runs);
+        setRunsLoaded(true);
         setError('');
         const live = res.runs.some(isLive);
         timer = window.setTimeout(tick, live ? 2000 : 15000);
       } catch (e: any) {
         if (cancelled) return;
         setError(e.message);
+        setRunsLoaded(true);
         timer = window.setTimeout(tick, 8000);
       }
     }

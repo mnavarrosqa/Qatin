@@ -37,7 +37,7 @@ import {
 import { LlmProvider, ToolDefinition } from '../llm';
 import { testQueue } from '../queue';
 import { logger } from '../utils/logger';
-import { getScreenshotsDir } from '../paths';
+import { getScreenshotsDir, isPathInside } from '../paths';
 import { presentRun } from '../runs/progress';
 
 export { SKILL_CHAT_TOOLS };
@@ -72,7 +72,7 @@ function extractTicketKey(ticketId?: string, ticketUrl?: string): string | null 
 function screenshotPublicUrl(filePath: string): string {
   const screenshotsRoot = getScreenshotsDir();
   const abs = path.resolve(filePath);
-  if (abs.startsWith(screenshotsRoot)) {
+  if (isPathInside(screenshotsRoot, abs)) {
     const rel = path.relative(screenshotsRoot, abs).split(path.sep).join('/');
     return `/screenshots/${rel}`;
   }
@@ -841,11 +841,13 @@ export class QaChatToolRunner {
     };
 
     let status = await pollOnce();
-    if (
-      waitMs > 0 &&
-      status.status !== 'completed' &&
-      status.status !== 'failed'
-    ) {
+    const isTerminal = (s: { status: string; phase?: string }) =>
+      s.status === 'completed' ||
+      s.status === 'failed' ||
+      s.status === 'cancelled' ||
+      s.phase === 'cancelled';
+
+    if (waitMs > 0 && !isTerminal(status)) {
       const deadline = Date.now() + waitMs;
       while (Date.now() < deadline) {
         if (this.signal?.aborted) {
@@ -864,7 +866,7 @@ export class QaChatToolRunner {
         });
         await sleep(2000, this.signal);
         status = await pollOnce();
-        if (status.status === 'completed' || status.status === 'failed') break;
+        if (isTerminal(status)) break;
       }
     }
 

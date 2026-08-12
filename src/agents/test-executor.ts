@@ -366,20 +366,8 @@ export class TestExecutor {
     const stepLower = step.toLowerCase();
     const processedStep = step.replace(/\{\{BASE_URL\}\}/g, this.baseUrl);
 
-    // Analyzer emits Spanish steps; match ES + EN verbs so we actually drive the page.
-    if (
-      /iniciar\s+sesi[oó]n|\blog\s*in\b|\bsign\s*in\b/.test(stepLower) ||
-      (/\blogin\b/.test(stepLower) && !/\blog\s*out\b|\blogout\b/.test(stepLower))
-    ) {
-      await this.performLogin(page);
-      return;
-    }
-
-    if (
-      /\bnavegar\b|\babrir\b|\bir\s+a\b|\bvisitar\b|\bnavigate\b|\bgo\s+to\b|\bopen\b/.test(
-        stepLower
-      )
-    ) {
+    // Prefer navigate/click before login so "go to /login" / "click Login" work.
+    if (this.isNavigateStep(stepLower, processedStep)) {
       const url = this.resolveNavigationUrl(processedStep);
       await page.goto(url, { waitUntil: 'domcontentloaded' });
       await page
@@ -408,11 +396,12 @@ export class TestExecutor {
       return;
     }
 
-    if (
-      /\bcompletar\b|\brellenar\b|\bescribir\b|\btipear\b|\bingresar\b|\bfill\b|\btype\b|\benter\b/.test(
-        stepLower
-      )
-    ) {
+    if (this.isLoginStep(stepLower)) {
+      await this.performLogin(page);
+      return;
+    }
+
+    if (this.isFillStep(stepLower, processedStep)) {
       const valueMatch =
         processedStep.match(/(?:with|con)\s+['"]([^'"]+)['"]/i) ||
         processedStep.match(/['"]([^'"]+)['"]/);
@@ -529,6 +518,49 @@ export class TestExecutor {
     }
 
     throw new Error(`Acción de paso no reconocida: ${step}`);
+  }
+
+  private isNavigateStep(stepLower: string, processedStep: string): boolean {
+    if (
+      /\bnavegar\b|\bir\s+a\b|\bvisitar\b|\bnavigate\b|\bgo\s+to\b|\bingresar\s+a\b|\bentrar\s+(a|en)\b/.test(
+        stepLower
+      )
+    ) {
+      return true;
+    }
+    // "abrir/open" only when it looks like navigation (URL/path/page), not "abrir el menú".
+    if (/\babrir\b|\bopen\b/.test(stepLower)) {
+      return /(https?:\/\/|\/[A-Za-z0-9]|p[aá]gina|url|sitio|app|aplicaci[oó]n|\bpage\b|\bsite\b)/i.test(
+        processedStep
+      );
+    }
+    return false;
+  }
+
+  private isLoginStep(stepLower: string): boolean {
+    if (/iniciar\s+sesi[oó]n|\blog\s*in\b|\bsign\s*in\b|\bautentic/.test(stepLower)) {
+      return true;
+    }
+    // Bare "login" as the action (not a button label after click/navigate).
+    return /^(hacer\s+)?login\b/.test(stepLower.trim());
+  }
+
+  private isFillStep(stepLower: string, processedStep: string): boolean {
+    if (
+      /\bcompletar\b|\brellenar\b|\bescribir\b|\btipear\b|\bfill\b|\btype\b/.test(
+        stepLower
+      )
+    ) {
+      return true;
+    }
+    // "ingresar el email" / "ingresar 'x'" — not "ingresar a /dashboard".
+    if (/\bingresar\b(?!\s+a\b)/.test(stepLower)) return true;
+    // "enter 'value'" / "enter with 'value'" — not bare "press Enter".
+    if (/\benter\s+['"]/.test(stepLower)) return true;
+    if (/\benter\b/.test(stepLower) && /(?:with|con)\s+['"]/i.test(processedStep)) {
+      return true;
+    }
+    return false;
   }
 
   private resolveNavigationUrl(processedStep: string): string {

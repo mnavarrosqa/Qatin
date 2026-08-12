@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { getScreenshotsDir } from '../paths';
+import { getScreenshotsDir, isPathInside } from '../paths';
 import type { TestRunRow } from '../db';
 
 export type RunPhase =
@@ -141,7 +141,7 @@ function parseResult(raw: string | null): Record<string, unknown> | null {
 function screenshotPublicUrl(filePath: string): string {
   const screenshotsRoot = getScreenshotsDir();
   const abs = path.resolve(filePath);
-  if (abs.startsWith(screenshotsRoot)) {
+  if (isPathInside(screenshotsRoot, abs)) {
     const rel = path.relative(screenshotsRoot, abs).split(path.sep).join('/');
     return `/screenshots/${rel}`;
   }

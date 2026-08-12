@@ -61,6 +61,8 @@ const DEFAULT_CHAT_INSTRUCTIONS_FULL = `Workflow:
 
 Rules:
 - Never invent ticket content. Always use fetch_ticket or analyze_ticket.
+- Never invent runId, jobId, status, progress, or screenshots. Those exist only after enqueue_run / get_run_status / list_recent_runs return them in THIS turn. If you did not call the tool, say you still need to queue/check — do not fake a JSON result.
+- If the user asks to launch/run/enqueue tests ("lanzá", "ejecutá", "nueva ejecución", etc.), you MUST call enqueue_run before saying it is queued.
 - If config is missing (no project, no base_url, no LLM, no Jira creds): say exactly what is missing and where to configure it (Settings or Projects page).
 - Respond in human-readable text, not raw JSON (unless user asks for technical detail).
 - Never mention tool names (enqueue_run, get_run_status, etc.) to the user.
@@ -77,6 +79,8 @@ const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, 
 
 Rules:
 - Never invent ticket content. Use fetch_ticket or analyze_ticket.
+- Never invent runId/jobId/status/screenshots. Only report values returned by enqueue_run / get_run_status / list_recent_runs in THIS turn.
+- User asks to launch/run tests → you MUST call enqueue_run before saying it is queued.
 - If config is missing: say what and where to fix it.
 - Include screenshot URLs (/screenshots/...) when available.
 - Never mention tool names to the user. After a run is queued, point them to Ejecuciones with followPath (/runs?id=N).
@@ -199,6 +203,66 @@ function isProjectsInventoryQuestion(text: string): boolean {
     /\b([a-z][a-z0-9]+-\d+)\b/i.test(t) ||
     /\b(probar|testear|analizar|ejecutar|ticket|caso)\b/.test(t);
   return asksProjects && asksList && !looksLikeTicketWork;
+}
+
+/** User wants to queue a Playwright run now. */
+function isRunEnqueueIntent(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  if (
+    /\b(estado|status|progreso|cómo va|como va|resultados?)\b/.test(t) &&
+    !/\b(lanz|ejecut|encol|correr|corr[eé]|nueva ejecuci)/.test(t)
+  ) {
+    return false;
+  }
+  return (
+    /\b(lanz[aeá]|ejecut\w*|encol\w*|correr|corr[eé]|re-?ejecut\w*|nueva ejecuci[oó]n|enqueue|run (the )?tests)\b/i.test(
+      t
+    ) || /\bplaywright\b/.test(t)
+  );
+}
+
+function claimsFabricatedRun(text: string): boolean {
+  return (
+    /\brunId\b/i.test(text) &&
+    /\b(jobId|encolad|queued|ejecuci[oó]n)\b/i.test(text)
+  );
+}
+
+function extractTicketKey(text: string): string | null {
+  const matches = text.match(/\b([A-Z][A-Z0-9]+-\d+)\b/g);
+  if (!matches?.length) return null;
+  return matches[matches.length - 1];
+}
+
+function resolveTicketForEnqueue(
+  sessionId: number,
+  userMessage: string
+): string | null {
+  const fromUser = extractTicketKey(userMessage);
+  if (fromUser) return fromUser;
+
+  const rows = listChatMessages(sessionId);
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const key = extractTicketKey(rows[i].content || '');
+    if (key) return key;
+  }
+  return null;
+}
+
+function formatEnqueueReply(result: Record<string, unknown>): string {
+  if (result.error) {
+    return `No pude encolar la ejecución: ${String(result.error)}`;
+  }
+  const followPath =
+    typeof result.followPath === 'string'
+      ? result.followPath
+      : typeof result.runId === 'number'
+        ? `/runs?id=${result.runId}`
+        : '/runs';
+  const ticket =
+    typeof result.ticketId === 'string' ? ` de ${result.ticketId}` : '';
+  return `Listo: encolé la ejecución${ticket}. Seguí el progreso paso a paso en [Ejecuciones](${followPath}).`;
 }
 
 function answerProjectsInventory(

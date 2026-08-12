@@ -33,6 +33,13 @@ export function getScreenshotsDir(): string {
   );
 }
 
+/** True when `target` is `root` or a file/dir under it (sep-safe). */
+export function isPathInside(root: string, target: string): boolean {
+  const absRoot = path.resolve(root);
+  const abs = path.resolve(target);
+  return abs === absRoot || abs.startsWith(absRoot + path.sep);
+}
+
 export function getDbPath(): string {
   return resolveAppPath(process.env.SQLITE_PATH || DEFAULT_DB_PATH);
 }
