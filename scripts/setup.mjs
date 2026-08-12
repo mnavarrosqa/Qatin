@@ -127,6 +127,27 @@ function savePlugins(state) {
   db.close();
 }
 
+function saveSkills(state) {
+  const require = createRequire(path.join(ROOT, 'package.json'));
+  const Database = require('better-sqlite3');
+  const dbPath =
+    process.env.SQLITE_PATH || path.join(ROOT, 'data', 'qatin.db');
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  const db = new Database(dbPath);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
+  ).run('skills', JSON.stringify(state));
+  db.close();
+}
+
 function markComplete(summary) {
   fs.mkdirSync(path.dirname(MARKER), { recursive: true });
   fs.writeFileSync(
@@ -272,7 +293,49 @@ async function main() {
       info('Podés activarlos después en Configuración → Plugins');
     }
 
-    heading('6. Redis (cola de jobs)');
+    heading('6. Skills de chat');
+    info('Las skills cambian qué puede hacer el agente de chat (no el worker).');
+    info('Se pueden activar/desactivar en Configuración → Skills.');
+
+    log(`\n${c.bold}Test plan reviewer${c.reset}`);
+    info('Critica la estrategia antes de encolar.');
+    const reviewer = await ask(rl, '¿Activar Test plan reviewer?', true);
+
+    log(`\n${c.bold}Bug writer${c.reset}`);
+    info('Redacta bugs desde runs fallidos (crear en Jira queda off por default).');
+    const bugWriter = await ask(rl, '¿Activar Bug writer?', true);
+
+    log(`\n${c.bold}Selector coach${c.reset}`);
+    info('Sugiere selectores estables abriendo la URL con Playwright.');
+    const selectorCoach = await ask(rl, '¿Activar Selector coach?', false);
+
+    log(`\n${c.bold}Exploratory${c.reset}`);
+    info('Explora la app y sugiere gaps de cobertura (crawl acotado).');
+    const exploratory = await ask(rl, '¿Activar Exploratory?', false);
+
+    try {
+      saveSkills({
+        'test-plan-reviewer': {
+          installed: reviewer,
+          autoBeforeEnqueue: true,
+        },
+        'bug-writer': { installed: bugWriter, createInJira: false },
+        'selector-coach': { installed: selectorCoach },
+        exploratory: { installed: exploratory, maxPages: 8 },
+      });
+      ok(
+        `Skills → Reviewer: ${reviewer ? 'on' : 'off'}, Bug: ${
+          bugWriter ? 'on' : 'off'
+        }, Coach: ${selectorCoach ? 'on' : 'off'}, Explore: ${
+          exploratory ? 'on' : 'off'
+        }`
+      );
+    } catch (err) {
+      fail(`No pude guardar skills: ${err?.message || err}`);
+      info('Podés activarlas después en Configuración → Skills');
+    }
+
+    heading('7. Redis (cola de jobs)');
     info('Redis encola los tests para que el worker los procese en background.');
     info('Sin Redis, `npm start` puede fallar al conectar la queue.');
     const redis = spawnSync('redis-cli ping', {
@@ -292,6 +355,10 @@ async function main() {
       selfHeal,
       flakyRetry,
       networkGuard,
+      reviewer,
+      bugWriter,
+      selectorCoach,
+      exploratory,
       playwright: playwrightInstalled(),
     });
 

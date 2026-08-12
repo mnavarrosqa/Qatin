@@ -11,11 +11,20 @@ import { logger } from './utils/logger';
 import {
   getDb,
   updateTestRun,
+  getTestRun,
   getRunMemory,
   formatRunMemoryContext,
   saveRunMemory,
 } from './db';
-import { LlmProvider } from './llm';
+import {
+  progressPayload,
+  type RunProgressState,
+  type ScenarioProgress,
+} from './runs/progress';
+import {
+  assertRunNotCancelled,
+  RunCancelledError,
+} from './runs/manage';import { LlmProvider } from './llm';
 import { isInstalled } from './plugins';
 import dotenv from 'dotenv';
 import { ENV_PATH, ensureAppDirs } from './paths';
@@ -79,11 +88,16 @@ async function startWorker() {
     };
 
     if (runId) {
-      updateTestRun(runId, { status: 'active' });
+      assertRunNotCancelled(runId);
+      writeRunProgress(runId, {
+        phase: 'fetching',
+        label: 'Leyendo ticket',
+      });
     }
 
     try {
       job.progress(10);
+      assertRunNotCancelled(runId);
 
       let ticket;
       let jiraClient: JiraMcpClient | null = null;
@@ -115,6 +129,7 @@ async function startWorker() {
       }
 
       job.progress(30);
+      assertRunNotCancelled(runId);
 
       let testStrategy: TestStrategy;
       if (providedStrategy?.scenarios?.length) {
@@ -124,6 +139,10 @@ async function startWorker() {
         testStrategy = providedStrategy;
       } else {
         logger.info(`[${label}] Analyzing ticket...`);
+        writeRunProgress(runId, {
+          phase: 'analyzing',
+          label: 'Preparando casos',
+        });
 
         const analyzer = new TicketAnalyzer({
           provider: projectConfig?.llmProvider,
@@ -144,7 +163,19 @@ async function startWorker() {
       }
 
       job.progress(50);
+      assertRunNotCancelled(runId);
       logger.info(`[${label}] Executing tests...`);
+
+      const scenarios: ScenarioProgress[] = testStrategy.scenarios.map((s) => ({
+        id: s.id,
+        description: s.description,
+        status: 'pending',
+      }));
+      writeRunProgress(runId, {
+        phase: 'executing',
+        label: 'Ejecutando Playwright',
+        scenarios,
+      });
 
       const testExecutor = new TestExecutor({
         baseUrl: projectConfig?.baseUrl,
@@ -154,11 +185,53 @@ async function startWorker() {
 
       const executionResults = await testExecutor.executeTests(
         ticket.key,
-        testStrategy
+        testStrategy,
+        (event) => {
+          assertRunNotCancelled(runId);
+          if (event.type === 'scenario_start') {
+            scenarios[event.index] = {
+              ...scenarios[event.index],
+              status: 'running',
+            };
+            writeRunProgress(runId, {
+              phase: 'executing',
+              label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarios: [...scenarios],
+            });
+          } else if (event.type === 'step') {
+            writeRunProgress(runId, {
+              phase: 'executing',
+              label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              currentStep: event.step,
+              stepIndex: event.stepIndex,
+              stepTotal: event.stepTotal,
+              scenarios: [...scenarios],
+            });
+          } else {
+            scenarios[event.index] = {
+              id: event.scenario.id,
+              description: event.scenario.description,
+              status: event.result.success ? 'passed' : 'failed',
+              duration: event.result.duration,
+              error: event.result.errors[0],
+            };
+            writeRunProgress(runId, {
+              phase: 'executing',
+              label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarios: [...scenarios],
+            });
+          }
+        }
       );
 
       job.progress(80);
+      assertRunNotCancelled(runId);
       logger.info(`[${label}] Compiling results...`);
+      writeRunProgress(runId, {
+        phase: 'compiling',
+        label: 'Compilando resultados',
+        scenarios,
+      });
       const summary = TestExecutor.getSummary(executionResults);
       const allScreenshots = executionResults.flatMap((r) => r.screenshots);
       const detailsReport = generateDetailedReport(
@@ -185,6 +258,11 @@ async function startWorker() {
       if (source === 'jira' && jiraClient) {
         job.progress(90);
         logger.info(`[${label}] Posting results to Jira...`);
+        writeRunProgress(runId, {
+          phase: 'reporting',
+          label: 'Publicando en Jira',
+          scenarios,
+        });
 
         try {
           await jiraClient.postTestResults(ticket.key, {
@@ -234,8 +312,10 @@ async function startWorker() {
       };
 
       if (runId) {
+        assertRunNotCancelled(runId);
         updateTestRun(runId, {
           status: 'completed',
+          phase: 'completed',
           result_json: JSON.stringify(result),
           ticket_id: ticket.key,
         });
@@ -245,11 +325,27 @@ async function startWorker() {
       logger.info(`[${label}] Job completed successfully`);
       return result;
     } catch (error: any) {
+      if (
+        error instanceof RunCancelledError ||
+        error?.name === 'RunCancelledError'
+      ) {
+        logger.info(`[${label}] Job cancelled by user`);
+        return { success: false, cancelled: true };
+      }
+
       logger.error(`[${label}] Job failed:`, error);
 
       if (runId) {
+        const current = getTestRun(runId);
+        if (
+          current?.status === 'cancelled' ||
+          current?.phase === 'cancelled'
+        ) {
+          return { success: false, cancelled: true };
+        }
         updateTestRun(runId, {
           status: 'failed',
+          phase: 'failed',
           result_json: JSON.stringify({
             success: false,
             error: error.message,
@@ -281,6 +377,19 @@ async function startWorker() {
   });
 
   logger.info('Worker started and waiting for jobs...');
+}
+
+function writeRunProgress(
+  runId: number | undefined,
+  state: RunProgressState
+): void {
+  if (!runId) return;
+  assertRunNotCancelled(runId);
+  updateTestRun(runId, {
+    status: state.phase === 'queued' ? 'queued' : 'active',
+    phase: state.phase,
+    progress_json: progressPayload(state),
+  });
 }
 
 function saveEngramMemory(opts: {

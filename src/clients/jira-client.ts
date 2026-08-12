@@ -259,6 +259,82 @@ export class JiraClient {
   }
 
   /**
+   * Create a new Jira issue (typically a Bug).
+   */
+  async createIssue(opts: {
+    projectKey: string;
+    summary: string;
+    description: string;
+    issueType?: string;
+    labels?: string[];
+    attachments?: Array<{ name: string; buffer: Buffer }>;
+  }): Promise<{ key: string; id: string; self: string }> {
+    const issueType = opts.issueType || 'Bug';
+    const paragraphs = opts.description
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => ({
+        type: 'paragraph',
+        content: [{ type: 'text', text: line }],
+      }));
+
+    const body = {
+      fields: {
+        project: { key: opts.projectKey },
+        summary: opts.summary.slice(0, 255),
+        issuetype: { name: issueType },
+        description: {
+          type: 'doc',
+          version: 1,
+          content: paragraphs.length
+            ? paragraphs
+            : [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: opts.description || '(sin detalle)' }],
+                },
+              ],
+        },
+        ...(opts.labels?.length ? { labels: opts.labels } : {}),
+      },
+    };
+
+    try {
+      logger.info(`Creating Jira ${issueType} in ${opts.projectKey}: ${opts.summary}`);
+      const response = await this.client.post('/issue', body);
+      const created = response.data as { key: string; id: string; self: string };
+
+      if (opts.attachments?.length) {
+        for (const file of opts.attachments) {
+          try {
+            await this.uploadAttachment(created.key, file.name, file.buffer);
+          } catch (attachErr: any) {
+            logger.warn(
+              `Attachment failed for ${created.key}/${file.name}:`,
+              attachErr?.message || attachErr
+            );
+          }
+        }
+      }
+
+      logger.info(`Created Jira issue ${created.key}`);
+      return created;
+    } catch (error: any) {
+      logger.error(
+        'Error creating Jira issue:',
+        error.response?.data || error.message
+      );
+      throw new Error(
+        `No se pudo crear el issue en Jira: ${
+          error.response?.data?.errorMessages?.join?.(', ') ||
+          error.message
+        }`
+      );
+    }
+  }
+
+  /**
    * Upload an attachment to a Jira issue
    */
   private async uploadAttachment(

@@ -23,8 +23,10 @@ export type IconName =
   | 'key'
   | 'bot'
   | 'plugin'
+  | 'skill'
   | 'cpu'
-  | 'download';
+  | 'download'
+  | 'chevronDown';
 
 const ICONS: Record<IconName, PathSpec[]> = {
   chat: [
@@ -131,6 +133,11 @@ const ICONS: Record<IconName, PathSpec[]> = {
       d: 'M9 2.5h2v3h2v-3h2v3h1.75A2.25 2.25 0 0 1 19 7.75V11h2.25a.75.75 0 0 1 .75.75v2.5a.75.75 0 0 1-.75.75H19v3.25A2.25 2.25 0 0 1 16.75 21h-9.5A2.25 2.25 0 0 1 5 18.75V15H2.75a.75.75 0 0 1-.75-.75v-2.5a.75.75 0 0 1 .75-.75H5V7.75A2.25 2.25 0 0 1 7.25 5.5H9v-3Z',
     },
   ],
+  skill: [
+    {
+      d: 'M12 2.5 13.8 8.2 19.75 9l-4.4 3.9 1.3 5.85L12 15.9l-4.65 2.85 1.3-5.85L4.25 9l5.95-.8L12 2.5Z',
+    },
+  ],
   cpu: [
     {
       d: 'M8.5 4h7A2.5 2.5 0 0 1 18 6.5V8h1.5v2H18v4h1.5v2H18v1.5A2.5 2.5 0 0 1 15.5 20H14v1.5h-4V20H8.5A2.5 2.5 0 0 1 6 17.5V16H4.5v-2H6v-4H4.5V8H6V6.5A2.5 2.5 0 0 1 8.5 4ZM9.5 9h5v5h-5V9Z',
@@ -140,6 +147,12 @@ const ICONS: Record<IconName, PathSpec[]> = {
   download: [
     {
       d: 'M11 3h2v10.2l3.4-3.4 1.4 1.4L12 17.4 6.2 11.2l1.4-1.4L11 13.2V3ZM4 18.5h16V20.5H4v-2Z',
+    },
+  ],
+  chevronDown: [
+    {
+      d: 'M5.47 8.97a.75.75 0 0 1 1.06 0L12 14.44l5.47-5.47a.75.75 0 1 1 1.06 1.06l-6 6a.75.75 0 0 1-1.06 0l-6-6a.75.75 0 0 1 0-1.06Z',
+      evenodd: true,
     },
   ],
 };

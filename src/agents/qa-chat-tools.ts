@@ -25,10 +25,30 @@ import {
   type AnalyzeOptions,
 } from './ticket-analyzer';
 import { isInstalled } from '../plugins';
+import {
+  getAllowedSkillToolNames,
+  getInstalledSkillPlaybooks,
+} from '../skills';
+import {
+  SKILL_CHAT_TOOLS,
+  runSkillTool,
+  skillToolLabel,
+} from './qa-chat-skill-tools';
 import { LlmProvider, ToolDefinition } from '../llm';
 import { testQueue } from '../queue';
 import { logger } from '../utils/logger';
 import { getScreenshotsDir } from '../paths';
+import { presentRun } from '../runs/progress';
+
+export { SKILL_CHAT_TOOLS };
+
+export function getActiveChatTools(): ToolDefinition[] {
+  const allowed = getAllowedSkillToolNames();
+  const skillTools = SKILL_CHAT_TOOLS.filter((t) => allowed.has(t.name));
+  return [...QA_CHAT_TOOLS, ...skillTools];
+}
+
+export { getInstalledSkillPlaybooks };
 
 function descriptionToText(content: unknown): string {
   if (!content) return '';
@@ -318,6 +338,12 @@ export class QaChatToolRunner {
     name: string,
     args: Record<string, unknown>
   ): Promise<unknown> {
+    const skillNames = new Set(SKILL_CHAT_TOOLS.map((t) => t.name));
+    if (skillNames.has(name)) {
+      const projectId = this.requireProjectId();
+      return runSkillTool(name, args, projectId);
+    }
+
     switch (name) {
       case 'list_projects':
         return {
@@ -403,14 +429,20 @@ export class QaChatToolRunner {
           typeof args.limit === 'number' && args.limit > 0
             ? Math.min(args.limit, 50)
             : 10;
-        const runs = listTestRuns(limit, projectId).map((r) => ({
-          id: r.id,
-          ticket_id: r.ticket_id,
-          status: r.status,
-          job_id: r.job_id,
-          source: r.source,
-          created_at: r.created_at,
-        }));
+        const runs = listTestRuns(limit, projectId).map((r) => {
+          const presented = presentRun(r);
+          return {
+            id: presented.id,
+            ticket_id: presented.ticket_id,
+            status: presented.status,
+            phase: presented.phase,
+            phaseLabel: presented.phaseLabel,
+            followPath: presented.followPath,
+            job_id: presented.job_id,
+            source: presented.source,
+            created_at: presented.created_at,
+          };
+        });
         return { runs };
       }
 
@@ -705,7 +737,9 @@ export class QaChatToolRunner {
       jobId: String(job.id),
       ticketId,
       source,
-      message: 'Job encolado. Usá get_run_status para seguir el progreso.',
+      followPath: `/runs?id=${run.id}`,
+      userHint:
+        'Decile al usuario que la corrida quedó en cola y que puede seguir el progreso paso a paso en Ejecuciones. Incluí el enlace followPath. Nunca menciones nombres de herramientas.',
     };
   }
 
@@ -774,12 +808,18 @@ export class QaChatToolRunner {
           : [];
 
       const evidence = fromResult.length ? fromResult : screenshots;
+      const presented = presentRun(current);
+      const phase = presented.phase;
 
       return {
         runId: current.id,
         jobId: current.job_id,
         ticketId: current.ticket_id,
         status: current.status,
+        phase,
+        phaseLabel: presented.phaseLabel,
+        currentStep: presented.currentStep,
+        followPath: presented.followPath,
         jobState,
         progress,
         failedReason,
@@ -816,9 +856,11 @@ export class QaChatToolRunner {
         this.emit?.({
           type: 'progress',
           tool: 'get_run_status',
-          detail: `Esperando run #${run.id} (${status.status}${
-            status.progress != null ? ` · ${status.progress}%` : ''
-          })`,
+          detail: status.currentStep
+            ? status.currentStep
+            : `Esperando run #${run.id} · ${status.phaseLabel}${
+                status.progress != null ? ` · ${status.progress}%` : ''
+              }`,
         });
         await sleep(2000, this.signal);
         status = await pollOnce();
@@ -853,6 +895,8 @@ function sleep(ms: number, signal?: AbortSignal) {
 }
 
 function toolLabel(name: string): string {
+  const skill = skillToolLabel(name);
+  if (skill) return skill;
   switch (name) {
     case 'list_projects':
       return 'Listando proyectos';
@@ -892,14 +936,28 @@ function summarizeToolResult(name: string, result: unknown): unknown {
     case 'save_test_cases':
       return { total: r.total, ticket_key: r.ticket_key };
     case 'enqueue_run':
-      return { runId: r.runId, jobId: r.jobId };
+      return { runId: r.runId, jobId: r.jobId, followPath: r.followPath };
     case 'get_run_status':
       return {
         status: r.status,
+        phase: r.phase,
         screenshots: r.screenshots?.length ?? 0,
       };
     case 'list_recent_runs':
       return { count: r.runs?.length ?? 0 };
+    case 'review_test_plan':
+      return {
+        readyToEnqueue: r.readyToEnqueue,
+        findings: r.findings?.length ?? 0,
+      };
+    case 'draft_bug':
+      return { summary: r.summary, runId: r.runId };
+    case 'create_jira_bug':
+      return { key: r.key, url: r.url };
+    case 'suggest_selectors':
+      return { count: r.recommendations?.length ?? 0, url: r.url };
+    case 'explore_app':
+      return { pages: r.pagesVisited, gaps: r.gaps?.length ?? 0 };
     default:
       return {};
   }

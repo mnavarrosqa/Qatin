@@ -4,12 +4,15 @@ import {
   type ProviderInfo,
   type PluginInfo,
   type PluginId,
+  type SkillInfo,
+  type SkillId,
   type LlmProvider,
 } from '../api';
 import { Icon, type IconName } from '../components/Icon';
 
-type SettingsTab = 'model' | 'keys' | 'jira' | 'agents' | 'plugins';
+type SettingsTab = 'model' | 'keys' | 'jira' | 'agents' | 'plugins' | 'skills';
 type PluginBusyAction = 'install' | 'uninstall' | 'config';
+type SkillBusyAction = PluginBusyAction;
 
 const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: 'model', label: 'Modelo', icon: 'cpu' },
@@ -17,6 +20,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: 'jira', label: 'Jira', icon: 'ticket' },
   { id: 'agents', label: 'Agentes', icon: 'bot' },
   { id: 'plugins', label: 'Plugins', icon: 'plugin' },
+  { id: 'skills', label: 'Skills', icon: 'skill' },
 ];
 
 function apiKeyFieldForProvider(provider: string): string | null {
@@ -66,13 +70,46 @@ function pluginActionLabel(
   return plugin.installed ? 'Desactivar' : 'Activar';
 }
 
+function skillBadge(
+  skill: SkillInfo,
+  busy: { id: SkillId; action: SkillBusyAction } | null
+): { className: string; label: string } {
+  if (busy?.id === skill.id) {
+    if (busy.action === 'install') {
+      return { className: 'badge busy', label: 'instalando…' };
+    }
+    if (busy.action === 'uninstall') {
+      return { className: 'badge busy', label: 'desinstalando…' };
+    }
+    return { className: 'badge busy', label: 'guardando…' };
+  }
+  if (skill.installed) {
+    return { className: 'badge ok', label: 'activo' };
+  }
+  return { className: 'badge warn', label: 'inactivo' };
+}
+
+function skillActionLabel(
+  skill: SkillInfo,
+  busy: { id: SkillId; action: SkillBusyAction } | null
+): string {
+  if (busy?.id === skill.id) {
+    if (busy.action === 'install') return 'Instalando…';
+    if (busy.action === 'uninstall') return 'Desinstalando…';
+    return 'Guardando…';
+  }
+  return skill.installed ? 'Desactivar' : 'Activar';
+}
+
 export function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>('model');
   const [settings, setSettings] = useState<Record<string, string>>({});
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [error, setError] = useState('');
   const [pluginError, setPluginError] = useState('');
+  const [skillError, setSkillError] = useState('');
   const [saved, setSaved] = useState(false);
   const [pluginBusy, setPluginBusy] = useState<{
     id: PluginId;
@@ -84,6 +121,16 @@ export function SettingsPage() {
     text: string;
   } | null>(null);
   const pluginFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [skillBusy, setSkillBusy] = useState<{
+    id: SkillId;
+    action: SkillBusyAction;
+  } | null>(null);
+  const [skillFlash, setSkillFlash] = useState<{
+    id: SkillId;
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const skillFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -99,11 +146,18 @@ export function SettingsPage() {
   const mcpConnected = settings.use_mcp === 'true';
 
   useEffect(() => {
-    Promise.all([api.getSettings(), api.getProviders(), api.getPlugins(), api.getAgentPrompts()])
-      .then(([s, p, pl, ap]) => {
+    Promise.all([
+      api.getSettings(),
+      api.getProviders(),
+      api.getPlugins(),
+      api.getSkills(),
+      api.getAgentPrompts(),
+    ])
+      .then(([s, p, pl, sk, ap]) => {
         setSettings(s.settings);
         setProviders(p.providers);
         setPlugins(pl.plugins);
+        setSkills(sk.skills);
         setPromptDefaults(ap.defaults);
         setPromptTier(ap.tier);
       })
@@ -113,6 +167,7 @@ export function SettingsPage() {
   useEffect(() => {
     return () => {
       if (pluginFlashTimer.current) clearTimeout(pluginFlashTimer.current);
+      if (skillFlashTimer.current) clearTimeout(skillFlashTimer.current);
     };
   }, []);
 
@@ -122,6 +177,15 @@ export function SettingsPage() {
     pluginFlashTimer.current = setTimeout(() => {
       setPluginFlash((prev) => (prev?.id === id ? null : prev));
       pluginFlashTimer.current = null;
+    }, 3500);
+  }
+
+  function flashSkill(id: SkillId, ok: boolean, text: string) {
+    if (skillFlashTimer.current) clearTimeout(skillFlashTimer.current);
+    setSkillFlash({ id, ok, text });
+    skillFlashTimer.current = setTimeout(() => {
+      setSkillFlash((prev) => (prev?.id === id ? null : prev));
+      skillFlashTimer.current = null;
     }, 3500);
   }
 
@@ -303,14 +367,77 @@ export function SettingsPage() {
     }
   }
 
+  async function toggleSkillInstall(skill: SkillInfo) {
+    const nextInstalled = !skill.installed;
+    setSkillError('');
+    setSkillFlash(null);
+    setSkillBusy({
+      id: skill.id,
+      action: nextInstalled ? 'install' : 'uninstall',
+    });
+    try {
+      const res = await api.updateSkill(skill.id, {
+        installed: nextInstalled,
+        autoBeforeEnqueue: skill.autoBeforeEnqueue,
+        createInJira: skill.createInJira,
+        maxPages: skill.maxPages,
+      });
+      setSkills(res.skills);
+      flashSkill(
+        skill.id,
+        true,
+        nextInstalled
+          ? 'Activada. El chat la usa desde el próximo mensaje.'
+          : 'Desactivada. Ya no se ofrece en el chat.'
+      );
+    } catch (e: any) {
+      const msg = e.message || 'No se pudo actualizar la skill';
+      setSkillError(msg);
+      flashSkill(skill.id, false, msg);
+    } finally {
+      setSkillBusy(null);
+    }
+  }
+
+  async function updateSkillConfig(
+    skill: SkillInfo,
+    patch: {
+      autoBeforeEnqueue?: boolean;
+      createInJira?: boolean;
+      maxPages?: number;
+    },
+    feedback: string
+  ) {
+    setSkillError('');
+    setSkillFlash(null);
+    setSkillBusy({ id: skill.id, action: 'config' });
+    try {
+      const res = await api.updateSkill(skill.id, {
+        installed: skill.installed,
+        autoBeforeEnqueue: skill.autoBeforeEnqueue,
+        createInJira: skill.createInJira,
+        maxPages: skill.maxPages,
+        ...patch,
+      });
+      setSkills(res.skills);
+      flashSkill(skill.id, true, feedback);
+    } catch (e: any) {
+      const msg = e.message || 'No se pudo guardar la configuración';
+      setSkillError(msg);
+      flashSkill(skill.id, false, msg);
+    } finally {
+      setSkillBusy(null);
+    }
+  }
+
   return (
     <>
       <header className="page-head">
         <h1>Configuración</h1>
         <p>
           Defaults globales de LLM, claves API, Jira MCP, instrucciones de
-          agentes y plugins. La config del proyecto pisa los defaults de LLM
-          cuando está seteada.
+          agentes, plugins de runtime y skills del chat. La config del proyecto
+          pisa los defaults de LLM cuando está seteada.
         </p>
       </header>
 
@@ -335,6 +462,8 @@ export function SettingsPage() {
               setError('');
               setPluginError('');
               setPluginFlash(null);
+              setSkillError('');
+              setSkillFlash(null);
               setTestMsg(null);
             }}
           >
@@ -763,6 +892,150 @@ export function SettingsPage() {
                           onClick={() => void toggleInstall(plugin)}
                         >
                           {pluginActionLabel(plugin, pluginBusy)}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === 'skills' && (
+          <div
+            role="tabpanel"
+            id="panel-skills"
+            aria-labelledby="tab-skills"
+          >
+            <p className="panel-lead">
+              Skills del chat: cambian qué puede hacer el agente de QA
+              (revisar planes, redactar bugs, sugerir selectores, explorar la
+              app). No afectan el worker de Playwright; eso son Plugins.
+            </p>
+            {skillError && <p className="error">{skillError}</p>}
+            {skills.length === 0 && !skillError ? (
+              <p className="empty">Cargando skills…</p>
+            ) : (
+              <div className="list">
+                {skills.map((skill) => {
+                  const badge = skillBadge(skill, skillBusy);
+                  const busy = skillBusy?.id === skill.id;
+                  const flash =
+                    skillFlash?.id === skill.id ? skillFlash : null;
+                  return (
+                    <div
+                      className={`list-item${busy ? ' is-busy' : ''}`}
+                      key={skill.id}
+                    >
+                      <div>
+                        <h3>{skill.name}</h3>
+                        <p>{skill.description}</p>
+                        {skill.id === 'test-plan-reviewer' &&
+                          skill.installed && (
+                            <div className="field plugin-config">
+                              <label htmlFor={`auto-${skill.id}`}>
+                                <input
+                                  id={`auto-${skill.id}`}
+                                  type="checkbox"
+                                  checked={skill.autoBeforeEnqueue !== false}
+                                  disabled={busy}
+                                  onChange={(e) =>
+                                    void updateSkillConfig(
+                                      skill,
+                                      {
+                                        autoBeforeEnqueue: e.target.checked,
+                                      },
+                                      e.target.checked
+                                        ? 'Revisar antes de encolar: sí'
+                                        : 'Revisar antes de encolar: no'
+                                    )
+                                  }
+                                />{' '}
+                                Revisar antes de encolar
+                              </label>
+                            </div>
+                          )}
+                        {skill.id === 'bug-writer' && skill.installed && (
+                          <div className="field plugin-config">
+                            <label htmlFor={`jira-${skill.id}`}>
+                              <input
+                                id={`jira-${skill.id}`}
+                                type="checkbox"
+                                checked={Boolean(skill.createInJira)}
+                                disabled={busy}
+                                onChange={(e) =>
+                                  void updateSkillConfig(
+                                    skill,
+                                    { createInJira: e.target.checked },
+                                    e.target.checked
+                                      ? 'Crear bugs en Jira: permitido'
+                                      : 'Crear bugs en Jira: solo draft'
+                                  )
+                                }
+                              />{' '}
+                              Permitir crear bugs en Jira
+                            </label>
+                          </div>
+                        )}
+                        {skill.id === 'exploratory' && skill.installed && (
+                          <div className="field plugin-config">
+                            <label htmlFor={`pages-${skill.id}`}>
+                              Máx. páginas
+                            </label>
+                            <select
+                              id={`pages-${skill.id}`}
+                              value={skill.maxPages ?? 8}
+                              disabled={busy}
+                              onChange={(e) =>
+                                void updateSkillConfig(
+                                  skill,
+                                  { maxPages: Number(e.target.value) },
+                                  `Máx. páginas: ${e.target.value}`
+                                )
+                              }
+                            >
+                              <option value={3}>3</option>
+                              <option value={5}>5</option>
+                              <option value={8}>8</option>
+                              <option value={12}>12</option>
+                              <option value={15}>15</option>
+                            </select>
+                          </div>
+                        )}
+                        {flash && (
+                          <p
+                            className={
+                              flash.ok
+                                ? 'plugin-feedback ok'
+                                : 'plugin-feedback fail'
+                            }
+                            role="status"
+                            aria-live="polite"
+                          >
+                            {flash.text}
+                          </p>
+                        )}
+                      </div>
+                      <div className="actions">
+                        <span className={badge.className} aria-live="polite">
+                          {busy && (
+                            <span className="badge-spinner" aria-hidden />
+                          )}
+                          {badge.label}
+                        </span>
+                        <button
+                          className={
+                            skill.installed && !busy
+                              ? 'btn btn-ghost btn-compact'
+                              : 'btn btn-compact'
+                          }
+                          type="button"
+                          disabled={busy}
+                          aria-busy={busy}
+                          onClick={() => void toggleSkillInstall(skill)}
+                        >
+                          {skillActionLabel(skill, skillBusy)}
                         </button>
                       </div>
                     </div>

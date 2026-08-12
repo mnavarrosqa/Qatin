@@ -10,6 +10,7 @@ import {
   getSettings,
   upsertSettings,
   listTestRuns,
+  getTestRun,
   createTestRun,
   updateTestRun,
   getProject,
@@ -39,6 +40,11 @@ import {
   isInstalled,
 } from '../plugins';
 import {
+  listSkills,
+  updateSkillConfig,
+  isSkillId,
+} from '../skills';
+import {
   TicketAnalyzer,
   createSyntheticTicket,
   TestStrategy,
@@ -46,6 +52,8 @@ import {
 } from '../agents/ticket-analyzer';
 import { getJiraClient } from '../clients/jira-mcp-client';
 import { runQaChatTurn, getDefaultChatInstructions } from '../agents/qa-chat-agent';
+import { presentRun, presentRunDetail } from '../runs/progress';
+import { cancelTestRun, removeTestRun } from '../runs/manage';
 
 const router = Router();
 
@@ -392,7 +400,66 @@ router.post('/jira/mcp/disconnect', async (_req, res) => {
 
 router.get('/runs', (req, res) => {
   const limit = parseInt(req.query.limit as string) || 50;
-  res.json({ runs: listTestRuns(limit) });
+  const projectId = parseInt(req.query.project_id as string, 10);
+  if (!Number.isFinite(projectId) || projectId <= 0) {
+    return res.json({ runs: [] });
+  }
+  res.json({ runs: listTestRuns(limit, projectId).map(presentRun) });
+});
+
+router.get('/runs/:id', (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Run inválido' });
+  }
+  const run = getTestRun(id);
+  if (!run) {
+    return res.status(404).json({ error: 'Run no encontrado' });
+  }
+  const projectId = parseInt(req.query.project_id as string, 10);
+  if (Number.isFinite(projectId) && projectId > 0 && run.project_id !== projectId) {
+    return res.status(404).json({ error: 'Run no encontrado' });
+  }
+  res.json({ run: presentRunDetail(run) });
+});
+
+router.post('/runs/:id/cancel', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Run inválido' });
+  }
+  try {
+    const result = await cancelTestRun(id);
+    if (!result.run) {
+      return res.status(404).json({ error: result.error || 'Run no encontrado' });
+    }
+    if (result.error) {
+      return res.status(409).json({ error: result.error, run: presentRun(result.run) });
+    }
+    res.json({ run: presentRun(result.run) });
+  } catch (error: any) {
+    logger.error('Error cancelling run:', error);
+    res.status(500).json({ error: 'No se pudo cancelar la ejecución' });
+  }
+});
+
+router.delete('/runs/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Run inválido' });
+  }
+  try {
+    const result = await removeTestRun(id);
+    if (!result.ok) {
+      return res
+        .status(result.error === 'Run no encontrado' ? 404 : 500)
+        .json({ error: result.error || 'No se pudo borrar' });
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    logger.error('Error deleting run:', error);
+    res.status(500).json({ error: 'No se pudo borrar la ejecución' });
+  }
 });
 
 router.get('/plugins', (_req, res) => {
@@ -422,6 +489,39 @@ router.put('/plugins/:id', (req, res) => {
       return res.status(400).json({ error: 'Pedido inválido', details: error.errors });
     }
     logger.error('Error updating plugin:', error);
+    res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+router.get('/skills', (_req, res) => {
+  res.json({ skills: listSkills() });
+});
+
+router.put('/skills/:id', (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!isSkillId(id)) {
+      return res.status(404).json({ error: 'Skill no encontrada' });
+    }
+
+    const schema = z.object({
+      installed: z.boolean(),
+      autoBeforeEnqueue: z.boolean().optional(),
+      createInJira: z.boolean().optional(),
+      maxPages: z.number().int().min(1).max(15).optional(),
+    });
+    const body = schema.parse(req.body);
+    const state = updateSkillConfig(id, body);
+    if (!state) {
+      return res.status(400).json({ error: 'Configuración de skill inválida' });
+    }
+
+    res.json({ skills: listSkills() });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Pedido inválido', details: error.errors });
+    }
+    logger.error('Error updating skill:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
   }
 });

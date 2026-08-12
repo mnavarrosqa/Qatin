@@ -46,6 +46,32 @@ export interface ExecutorConfig {
   plugins?: RuntimePlugins;
 }
 
+export type ExecutorProgressEvent =
+  | {
+      type: 'scenario_start';
+      index: number;
+      total: number;
+      scenario: TestScenario;
+    }
+  | {
+      type: 'step';
+      index: number;
+      total: number;
+      scenario: TestScenario;
+      step: string;
+      stepIndex: number;
+      stepTotal: number;
+    }
+  | {
+      type: 'scenario_end';
+      index: number;
+      total: number;
+      scenario: TestScenario;
+      result: ExecutionResult;
+    };
+
+export type ExecutorProgressHandler = (event: ExecutorProgressEvent) => void;
+
 export class TestExecutor {
   private browser: Browser | null = null;
   private screenshotsDir: string;
@@ -80,7 +106,8 @@ export class TestExecutor {
 
   async executeTests(
     ticketId: string,
-    strategy: TestStrategy
+    strategy: TestStrategy,
+    onProgress?: ExecutorProgressHandler
   ): Promise<ExecutionResult[]> {
     const results: ExecutionResult[] = [];
 
@@ -90,14 +117,29 @@ export class TestExecutor {
       const ticketScreenshotsDir = path.join(this.screenshotsDir, ticketId);
       await fs.mkdir(ticketScreenshotsDir, { recursive: true });
 
-      for (const scenario of strategy.scenarios) {
+      const total = strategy.scenarios.length;
+      for (let index = 0; index < total; index++) {
+        const scenario = strategy.scenarios[index];
         logger.info(`Executing scenario: ${scenario.id}`);
+        onProgress?.({ type: 'scenario_start', index, total, scenario });
         const result = await this.executeScenario(
           ticketId,
           scenario,
-          ticketScreenshotsDir
+          ticketScreenshotsDir,
+          (step, stepIndex, stepTotal) => {
+            onProgress?.({
+              type: 'step',
+              index,
+              total,
+              scenario,
+              step,
+              stepIndex,
+              stepTotal,
+            });
+          }
         );
         results.push(result);
+        onProgress?.({ type: 'scenario_end', index, total, scenario, result });
       }
     } catch (error: any) {
       logger.error('Error executing tests:', error);
@@ -112,7 +154,8 @@ export class TestExecutor {
   private async executeScenario(
     ticketId: string,
     scenario: TestScenario,
-    screenshotsDir: string
+    screenshotsDir: string,
+    onStep?: (step: string, stepIndex: number, stepTotal: number) => void
   ): Promise<ExecutionResult> {
     const startTime = Date.now();
     const stepResults: StepResult[] = [];
@@ -164,6 +207,7 @@ export class TestExecutor {
       for (let i = 0; i < scenario.steps.length; i++) {
         const step = scenario.steps[i];
         const stepStartTime = Date.now();
+        onStep?.(step, i, scenario.steps.length);
 
         try {
           logger.info(`Step ${i + 1}: ${step}`);
@@ -322,15 +366,29 @@ export class TestExecutor {
     const stepLower = step.toLowerCase();
     const processedStep = step.replace(/\{\{BASE_URL\}\}/g, this.baseUrl);
 
-    if (stepLower.includes('navigate') || stepLower.includes('go to')) {
-      const urlMatch = processedStep.match(/(https?:\/\/[^\s]+)/);
-      if (urlMatch) {
-        await page.goto(urlMatch[1], { waitUntil: 'domcontentloaded' });
-      }
+    // Analyzer emits Spanish steps; match ES + EN verbs so we actually drive the page.
+    if (
+      /iniciar\s+sesi[oó]n|\blog\s*in\b|\bsign\s*in\b/.test(stepLower) ||
+      (/\blogin\b/.test(stepLower) && !/\blog\s*out\b|\blogout\b/.test(stepLower))
+    ) {
+      await this.performLogin(page);
       return;
     }
 
-    if (stepLower.includes('click')) {
+    if (
+      /\bnavegar\b|\babrir\b|\bir\s+a\b|\bvisitar\b|\bnavigate\b|\bgo\s+to\b|\bopen\b/.test(
+        stepLower
+      )
+    ) {
+      const url = this.resolveNavigationUrl(processedStep);
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      await page
+        .waitForLoadState('networkidle', { timeout: 5000 })
+        .catch(() => undefined);
+      return;
+    }
+
+    if (/\bclick\b|\bclic\b|\bpulsar\b|\bpresionar\b/.test(stepLower)) {
       await this.withSelectorAction(
         page,
         processedStep,
@@ -351,12 +409,12 @@ export class TestExecutor {
     }
 
     if (
-      stepLower.includes('fill') ||
-      stepLower.includes('type') ||
-      stepLower.includes('enter')
+      /\bcompletar\b|\brellenar\b|\bescribir\b|\btipear\b|\bingresar\b|\bfill\b|\btype\b|\benter\b/.test(
+        stepLower
+      )
     ) {
-      let valueMatch =
-        processedStep.match(/with\s+['"]?([^'"]+)['"]?/i) ||
+      const valueMatch =
+        processedStep.match(/(?:with|con)\s+['"]([^'"]+)['"]/i) ||
         processedStep.match(/['"]([^'"]+)['"]/);
 
       await this.withSelectorAction(
@@ -384,14 +442,17 @@ export class TestExecutor {
       return;
     }
 
-    if (stepLower.includes('wait')) {
+    if (/\besperar\b|\bwait\b/.test(stepLower)) {
       const timeMatch = processedStep.match(
-        /(\d+)\s*(seconds?|ms|milliseconds?)/
+        /(\d+)\s*(seconds?|segundos?|ms|milliseconds?|milisegundos?)/i
       );
       if (timeMatch) {
         const time = parseInt(timeMatch[1]);
-        const unit = timeMatch[2];
-        const ms = unit.includes('second') ? time * 1000 : time;
+        const unit = timeMatch[2].toLowerCase();
+        const ms =
+          unit.startsWith('seg') || unit.startsWith('second')
+            ? time * 1000
+            : time;
         await page.waitForTimeout(ms);
       } else {
         await page.waitForTimeout(2000);
@@ -400,9 +461,9 @@ export class TestExecutor {
     }
 
     if (
-      stepLower.includes('check') ||
-      stepLower.includes('verify') ||
-      stepLower.includes('assert')
+      /\bverificar\b|\bcomprobar\b|\bvalidar\b|\basegurar\b|\bcheck\b|\bverify\b|\bassert\b/.test(
+        stepLower
+      )
     ) {
       await this.withSelectorAction(
         page,
@@ -419,16 +480,21 @@ export class TestExecutor {
             });
             return true;
           }
-          return false;
+          // No selector/text — at least confirm we left about:blank.
+          if (page.url() === 'about:blank') {
+            throw new Error('La página no cargó (sigue en about:blank)');
+          }
+          await page.waitForLoadState('domcontentloaded');
+          return true;
         }
       );
       return;
     }
 
-    if (stepLower.includes('scroll')) {
-      if (stepLower.includes('bottom')) {
+    if (/\bscroll\b|\bdesplaz/.test(stepLower)) {
+      if (/bottom|abajo|final/.test(stepLower)) {
         await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
-      } else if (stepLower.includes('top')) {
+      } else if (/top|arriba|inicio/.test(stepLower)) {
         await page.evaluate('window.scrollTo(0, 0)');
       } else {
         await page.evaluate('window.scrollBy(0, 500)');
@@ -436,7 +502,7 @@ export class TestExecutor {
       return;
     }
 
-    if (stepLower.includes('hover')) {
+    if (/\bhover\b|\bpasar\s+(el\s+)?mouse\b|\bencima\b/.test(stepLower)) {
       await this.withSelectorAction(
         page,
         processedStep,
@@ -448,7 +514,7 @@ export class TestExecutor {
       return;
     }
 
-    if (stepLower.includes('select')) {
+    if (/\bselect\b|\bseleccion/.test(stepLower)) {
       const valueMatch = processedStep.match(/['"]([^'"]+)['"]/);
       await this.withSelectorAction(
         page,
@@ -462,8 +528,95 @@ export class TestExecutor {
       return;
     }
 
-    logger.warn(`Unknown step action: ${step}, waiting 1s`);
-    await page.waitForTimeout(1000);
+    throw new Error(`Acción de paso no reconocida: ${step}`);
+  }
+
+  private resolveNavigationUrl(processedStep: string): string {
+    const abs = processedStep.match(/(https?:\/\/[^\s"'<>]+)/i);
+    if (abs) {
+      return abs[1].replace(/[.,;:)\]}]+$/, '');
+    }
+
+    const rel = processedStep.match(/\s(\/[A-Za-z0-9_./?#&=%-]*)/);
+    if (rel) {
+      const base = this.baseUrl.replace(/\/$/, '');
+      return `${base}${rel[1]}`;
+    }
+
+    return this.baseUrl;
+  }
+
+  private async performLogin(page: Page): Promise<void> {
+    if (!this.testUserEmail || !this.testUserPassword) {
+      throw new Error(
+        'Credenciales QA no configuradas (email/password del proyecto)'
+      );
+    }
+
+    if (!page.url().startsWith('http')) {
+      await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded' });
+    }
+
+    const emailSelectors = [
+      'input[type="email"]',
+      'input[name*="email" i]',
+      'input[id*="email" i]',
+      'input[autocomplete="username"]',
+      'input[name*="user" i]',
+    ];
+    const passwordSelectors = [
+      'input[type="password"]',
+      'input[name*="password" i]',
+      'input[id*="password" i]',
+      'input[autocomplete="current-password"]',
+    ];
+    const submitSelectors = [
+      'button[type="submit"]',
+      'input[type="submit"]',
+      'button:has-text("Iniciar")',
+      'button:has-text("Login")',
+      'button:has-text("Sign in")',
+      'button:has-text("Entrar")',
+    ];
+
+    const findVisible = async (selectors: string[]) => {
+      for (const sel of selectors) {
+        const loc = page.locator(sel).first();
+        if (await loc.count().catch(() => 0)) {
+          if (await loc.isVisible().catch(() => false)) return loc;
+        }
+      }
+      return null;
+    };
+
+    let email = await findVisible(emailSelectors);
+    if (!email) {
+      const loginUrl = `${this.baseUrl.replace(/\/$/, '')}/login`;
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
+      email = await findVisible(emailSelectors);
+    }
+    if (!email) {
+      throw new Error('No se encontró el campo de email/usuario para login');
+    }
+
+    const password = await findVisible(passwordSelectors);
+    if (!password) {
+      throw new Error('No se encontró el campo de password para login');
+    }
+
+    await email.fill(this.testUserEmail);
+    await password.fill(this.testUserPassword);
+
+    const submit = await findVisible(submitSelectors);
+    if (submit) {
+      await submit.click();
+    } else {
+      await password.press('Enter');
+    }
+
+    await page
+      .waitForLoadState('networkidle', { timeout: 10000 })
+      .catch(() => undefined);
   }
 
   private async withSelectorAction(

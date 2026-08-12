@@ -103,6 +103,8 @@ function migrate(database: Database.Database): void {
       pasted_summary TEXT,
       pasted_description TEXT,
       status TEXT NOT NULL DEFAULT 'queued',
+      phase TEXT NOT NULL DEFAULT 'queued',
+      progress_json TEXT,
       result_json TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -166,6 +168,22 @@ function migrate(database: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_chat_messages_session
       ON chat_messages(session_id, id);
   `);
+
+  ensureColumn(database, 'test_runs', 'phase', "TEXT NOT NULL DEFAULT 'queued'");
+  ensureColumn(database, 'test_runs', 'progress_json', 'TEXT');
+}
+
+function ensureColumn(
+  database: Database.Database,
+  table: string,
+  column: string,
+  definition: string
+): void {
+  const cols = database
+    .prepare(`PRAGMA table_info(${table})`)
+    .all() as Array<{ name: string }>;
+  if (cols.some((c) => c.name === column)) return;
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 export interface ProjectRow {
@@ -398,6 +416,8 @@ export interface TestRunRow {
   pasted_summary: string | null;
   pasted_description: string | null;
   status: string;
+  phase: string;
+  progress_json: string | null;
   result_json: string | null;
   created_at: string;
   updated_at: string;
@@ -417,8 +437,8 @@ export function createTestRun(input: TestRunInput): TestRunRow {
   const result = getDb()
     .prepare(
       `INSERT INTO test_runs (
-        project_id, job_id, source, ticket_id, pasted_summary, pasted_description, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+        project_id, job_id, source, ticket_id, pasted_summary, pasted_description, status, phase
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.project_id ?? null,
@@ -427,7 +447,8 @@ export function createTestRun(input: TestRunInput): TestRunRow {
       input.ticket_id ?? null,
       input.pasted_summary ?? null,
       input.pasted_description ?? null,
-      input.status || 'queued'
+      input.status || 'queued',
+      'queued'
     );
 
   return getTestRun(Number(result.lastInsertRowid))!;
@@ -452,6 +473,8 @@ export function updateTestRun(
   updates: Partial<{
     job_id: string;
     status: string;
+    phase: string;
+    progress_json: string | null;
     result_json: string;
     ticket_id: string;
   }>
@@ -464,6 +487,8 @@ export function updateTestRun(
       `UPDATE test_runs SET
         job_id = ?,
         status = ?,
+        phase = ?,
+        progress_json = ?,
         result_json = ?,
         ticket_id = ?,
         updated_at = datetime('now')
@@ -472,6 +497,10 @@ export function updateTestRun(
     .run(
       updates.job_id ?? existing.job_id,
       updates.status ?? existing.status,
+      updates.phase ?? existing.phase,
+      updates.progress_json !== undefined
+        ? updates.progress_json
+        : existing.progress_json,
       updates.result_json ?? existing.result_json,
       updates.ticket_id ?? existing.ticket_id,
       id
@@ -492,6 +521,11 @@ export function listTestRuns(limit = 50, projectId?: number | null): TestRunRow[
   return getDb()
     .prepare('SELECT * FROM test_runs ORDER BY created_at DESC LIMIT ?')
     .all(limit) as TestRunRow[];
+}
+
+export function deleteTestRun(id: number): boolean {
+  const result = getDb().prepare('DELETE FROM test_runs WHERE id = ?').run(id);
+  return result.changes > 0;
 }
 
 export interface RunMemoryRow {

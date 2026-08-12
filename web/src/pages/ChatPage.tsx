@@ -25,10 +25,17 @@ import {
   subscribeChatGeneration,
   toUiMessages,
   type UiMessage,
+  type ToolStep,
 } from '../chatGeneration';
 import { getFollowUps } from '../chatFollowUps';
 import { MessageBody } from '../chatMarkdown';
 import { Icon, type IconName } from '../components/Icon';
+import {
+  getActiveProjectId,
+  getActiveProjectVersion,
+  setActiveProjectId,
+  subscribeActiveProject,
+} from '../activeProject';
 
 const PROVIDER_SHORT: Record<LlmProvider, string> = {
   openai: 'OpenAI',
@@ -225,6 +232,34 @@ function usageTitle(u: ChatUsage): string {
   return parts.join(' · ');
 }
 
+const NEAR_BOTTOM_PX = 80;
+
+function threadIsNearBottom(el: HTMLElement) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+function enqueueRunId(tools?: ToolStep[]): number | null {
+  if (!tools) return null;
+  for (let i = tools.length - 1; i >= 0; i--) {
+    const step = tools[i];
+    if (step.tool !== 'enqueue_run' || step.status !== 'done') continue;
+    const data = step.data;
+    if (data && typeof data === 'object' && typeof (data as { runId?: unknown }).runId === 'number') {
+      return (data as { runId: number }).runId;
+    }
+  }
+  return null;
+}
+
+function runIdFromContent(text: string): number | null {
+  const match = text.match(/\/runs\?id=(\d+)/);
+  return match ? Number(match[1]) : null;
+}
+
 export function ChatPage({ active = true }: { active?: boolean }) {
   // Subscribe to a primitive version so React always re-renders on store updates
   useSyncExternalStore(
@@ -232,13 +267,18 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     getChatGenerationVersion,
     getChatGenerationVersion
   );
+  useSyncExternalStore(
+    subscribeActiveProject,
+    getActiveProjectVersion,
+    getActiveProjectVersion
+  );
   const generation = getChatGeneration();
+  const selectedProjectId = getActiveProjectId();
 
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
   const [session, setSession] = useState<ChatSession | null>(null);
-  const [selectedProjectId, setSelectedProjectId] = useState<number | ''>('');
   const [messages, setMessages] = useState<UiMessage[]>([]);
   const [input, setInput] = useState('');
   const [error, setError] = useState('');
@@ -247,13 +287,16 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const [savingProject, setSavingProject] = useState(false);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [settings, setSettings] = useState<Record<string, string>>({});
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const threadRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+  const jumpingRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bootstrappedRef = useRef(false);
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
   const [sessionsSlot, setSessionsSlot] = useState<HTMLElement | null>(null);
   const [query, setQuery] = useState('');
+  const [showJump, setShowJump] = useState(false);
 
   const liveForActive =
     generation && generation.sessionId === activeId ? generation : null;
@@ -273,14 +316,54 @@ export function ChatPage({ active = true }: { active?: boolean }) {
       if (activeId == null) setActiveId(liveForActive.sessionId);
       const pid = liveForActive.session.project_id ?? '';
       if (pid !== selectedProjectIdRef.current) {
-        setSelectedProjectId(pid);
+        setActiveProjectId(pid);
         refreshSessions(toProjectFilter(pid)).catch(() => undefined);
       }
     }
   }, [liveForActive, activeId]);
 
+  function pinToBottom() {
+    pinnedRef.current = true;
+    setShowJump(false);
+  }
+
+  function scrollThreadToBottom(behavior: ScrollBehavior) {
+    const el = threadRef.current;
+    if (!el) return;
+    pinToBottom();
+    jumpingRef.current = true;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+    if (behavior === 'auto') {
+      requestAnimationFrame(() => {
+        jumpingRef.current = false;
+      });
+    }
+  }
+
+  function jumpToBottom() {
+    scrollThreadToBottom(prefersReducedMotion() ? 'auto' : 'smooth');
+  }
+
+  function onThreadScroll() {
+    const el = threadRef.current;
+    if (!el) return;
+    const near = threadIsNearBottom(el);
+    if (jumpingRef.current) {
+      if (!near) return;
+      jumpingRef.current = false;
+    }
+    pinnedRef.current = near;
+    setShowJump((prev) => {
+      const next = !near;
+      return prev === next ? prev : next;
+    });
+  }
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    if (!pinnedRef.current) return;
+    const el = threadRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: 'auto' });
   }, [viewMessages, viewBusy]);
 
   useEffect(() => {
@@ -301,6 +384,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   }
 
   function clearThread() {
+    pinToBottom();
     setActiveId(null);
     setSession(null);
     setMessages([]);
@@ -308,6 +392,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   }
 
   async function openSession(id: number) {
+    pinToBottom();
     const live = getChatGeneration();
     if (live && live.sessionId === id) {
       setActiveId(id);
@@ -356,10 +441,14 @@ export function ChatPage({ active = true }: { active?: boolean }) {
       ]);
       setProjects(projResult.projects);
 
-      let projectId: number | '' = '';
+      let projectId: number | '' = getActiveProjectId();
+      const storedOk =
+        typeof projectId === 'number' &&
+        projResult.projects.some((p) => p.id === projectId);
+
       if (live?.session) {
         projectId = live.session.project_id ?? '';
-      } else {
+      } else if (!storedOk) {
         const recent = await api.listChatSessions(1).catch((e: Error) => {
           loadError = loadError || e.message;
           return { sessions: [] as ChatSession[] };
@@ -370,9 +459,11 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           projectId = projResult.projects[0].id;
         } else if (!recent.sessions[0] && projResult.projects.length) {
           projectId = projResult.projects[0].id;
+        } else {
+          projectId = '';
         }
       }
-      setSelectedProjectId(projectId);
+      setActiveProjectId(projectId);
 
       const sessResult = await api
         .listChatSessions(50, toProjectFilter(projectId))
@@ -433,7 +524,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
         setBusy(false);
         const pid = res.session.project_id ?? '';
         if (pid !== selectedProjectIdRef.current) {
-          setSelectedProjectId(pid);
+          setActiveProjectId(pid);
           refreshSessions(toProjectFilter(pid)).catch(() => undefined);
         }
       })
@@ -458,7 +549,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     });
     setActiveId(created.id);
     setSession(created);
-    if (created.project_id != null) setSelectedProjectId(created.project_id);
+    if (created.project_id != null) setActiveProjectId(created.project_id);
     await refreshSessions(created.project_id);
     return created.id;
   }
@@ -473,7 +564,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
             ? projects[0].id
             : null;
       if (projectId != null && selectedProjectId !== projectId) {
-        setSelectedProjectId(projectId);
+        setActiveProjectId(projectId);
       }
       const { session: created } = await api.createChatSession({
         project_id: projectId,
@@ -508,7 +599,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     const belongs =
       viewSession != null && (viewSession.project_id ?? '') === nextSelected;
 
-    setSelectedProjectId(nextSelected);
+    setActiveProjectId(nextSelected);
     setSavingProject(true);
     setError('');
     if (!belongs) clearThread();
@@ -516,7 +607,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
       const next = await refreshSessions(nextId);
       if (!belongs && next.length) await openSession(next[0].id);
     } catch (e: any) {
-      setSelectedProjectId(previous);
+      setActiveProjectId(previous);
       setError(e.message || 'No se pudo cambiar el proyecto');
     } finally {
       setSavingProject(false);
@@ -551,6 +642,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
 
     setError('');
     setInput('');
+    pinToBottom();
 
     try {
       const sessionId = await ensureSession();
@@ -803,7 +895,12 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           </div>
         )}
 
-        <div className="chat-thread">
+        <div className="chat-thread-wrap">
+          <div
+            className="chat-thread"
+            ref={threadRef}
+            onScroll={onThreadScroll}
+          >
           {viewMessages.length === 0 && !viewBusy && (
             <div className="chat-empty">
               <p className="chat-empty-kicker">Empezá por acá</p>
@@ -845,6 +942,10 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               m.kind === 'assistant'
                 ? (m.tools || []).filter((t) => t.tool && t.tool !== 'progress')
                 : [];
+            const runId =
+              m.kind === 'assistant'
+                ? enqueueRunId(visibleTools) || runIdFromContent(m.content)
+                : null;
             const runningVisible = visibleTools.filter(
               (t) => t.status === 'running'
             );
@@ -908,6 +1009,15 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                       })}
                     </ol>
                   )}
+                  {runId ? (
+                    <Link
+                      className="chat-run-link"
+                      to={`/runs?id=${runId}`}
+                    >
+                      <Icon name="runs" size={14} />
+                      Ver progreso en Ejecuciones
+                    </Link>
+                  ) : null}
                   {m.content ? (
                     <MessageBody text={m.content} streaming={isStreaming} />
                   ) : showThinking ? (
@@ -958,7 +1068,17 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               </article>
             );
           })}
-          <div ref={bottomRef} />
+          </div>
+          {showJump ? (
+            <button
+              type="button"
+              className="chat-jump-bottom"
+              onClick={jumpToBottom}
+              aria-label="Ir al final"
+            >
+              <Icon name="chevronDown" size={18} />
+            </button>
+          ) : null}
         </div>
 
         <form className="chat-composer" onSubmit={onSubmit}>

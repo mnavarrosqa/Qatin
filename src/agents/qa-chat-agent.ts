@@ -20,7 +20,7 @@ import {
   createChatMessage,
   updateChatSession,
 } from '../db';
-import { QA_CHAT_TOOLS, QaChatToolRunner, ToolEventEmitter } from './qa-chat-tools';
+import { QaChatToolRunner, ToolEventEmitter, getActiveChatTools, getInstalledSkillPlaybooks } from './qa-chat-tools';
 import { logger } from '../utils/logger';
 
 const MAX_ITERATIONS = 8;
@@ -63,6 +63,8 @@ Rules:
 - Never invent ticket content. Always use fetch_ticket or analyze_ticket.
 - If config is missing (no project, no base_url, no LLM, no Jira creds): say exactly what is missing and where to configure it (Settings or Projects page).
 - Respond in human-readable text, not raw JSON (unless user asks for technical detail).
+- Never mention tool names (enqueue_run, get_run_status, etc.) to the user.
+- After enqueue_run: tell the user the run is queued and they can follow it step by step in Ejecuciones. Always include the followPath (e.g. /runs?id=3). If still running after get_run_status, point them there instead of asking them to poll.
 - Always include screenshot URLs (/screenshots/...) when available.
 - If a run fails: analyze whether it is an app bug, a broken test case (bad selector, ambiguous step), or a config issue.
 - If user pastes free text (not a ticket key): treat it as a feature description using fetch_ticket with pasted_summary + pasted_description.
@@ -77,6 +79,7 @@ Rules:
 - Never invent ticket content. Use fetch_ticket or analyze_ticket.
 - If config is missing: say what and where to fix it.
 - Include screenshot URLs (/screenshots/...) when available.
+- Never mention tool names to the user. After a run is queued, point them to Ejecuciones with followPath (/runs?id=N).
 - Pasted text (not a key): use fetch_ticket with pasted_summary + pasted_description.
 - Xray export: full CSV in a \`\`\`csv fence (Summary, Description, Test Type, Step, Data, Expected Result). Never as plain text.
 - Keep responses short, use lists.
@@ -105,6 +108,7 @@ function buildSystemPrompt(opts: {
 
   const custom = (getSetting('agent_chat_instructions') || '').trim();
   const instructions = custom || getDefaultChatInstructions(opts.tier);
+  const skillPlaybooks = getInstalledSkillPlaybooks();
 
   const header = opts.tier === 'compact'
     ? `You are Qatin's QA agent. Answer in Spanish (argentino). Be concise.
@@ -122,7 +126,7 @@ ${opts.projectDirectory}
 - ${projectLine}
 - If the user only asks which projects exist, answer from the list above. Do not call list_projects unless you need fresh fields.
 
-${instructions}`;
+${instructions}${skillPlaybooks}`;
 }
 
 function historyToAgentMessages(
@@ -395,7 +399,7 @@ export async function runQaChatTurn(opts: {
       try {
         response = await client.agentChat({
           messages,
-          tools: QA_CHAT_TOOLS,
+          tools: getActiveChatTools(),
           temperature: 0.3,
           signal,
           onToken: (delta) => {

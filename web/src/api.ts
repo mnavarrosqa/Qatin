@@ -52,11 +52,41 @@ export interface TestRun {
   source: 'jira' | 'paste';
   ticket_id: string | null;
   pasted_summary: string | null;
-  pasted_description: string | null;
   status: string;
-  result_json: string | null;
+  phase: string;
+  phaseLabel: string;
+  currentStep: string | null;
   created_at: string;
   updated_at: string;
+  steps: RunPipelineStep[];
+  scenarios: RunScenarioView[];
+  summary: {
+    total: number;
+    successful: number;
+    failed: number;
+    passed: boolean;
+    totalDuration?: number;
+  } | null;
+  error: string | null;
+  followPath: string;
+}
+
+export type RunPipelineStep = {
+  id: string;
+  label: string;
+  state: 'done' | 'current' | 'pending' | 'failed';
+};
+
+export type RunScenarioView = {
+  id: string;
+  description: string;
+  status: 'pending' | 'running' | 'passed' | 'failed';
+  duration?: number;
+  error?: string;
+};
+
+export interface TestRunDetail extends TestRun {
+  screenshots: Array<{ name: string; url: string }>;
 }
 
 export type PluginId =
@@ -72,6 +102,23 @@ export interface PluginInfo {
   configurable: boolean;
   installed: boolean;
   maxRetries?: number;
+}
+
+export type SkillId =
+  | 'test-plan-reviewer'
+  | 'bug-writer'
+  | 'selector-coach'
+  | 'exploratory';
+
+export interface SkillInfo {
+  id: SkillId;
+  name: string;
+  description: string;
+  configurable: boolean;
+  installed: boolean;
+  autoBeforeEnqueue?: boolean;
+  createInJira?: boolean;
+  maxPages?: number;
 }
 
 export interface ChatSession {
@@ -238,14 +285,48 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
-  listRuns: (limit = 50) =>
-    request<{ runs: TestRun[] }>(`/api/runs?limit=${limit}`),
+  listRuns: (limit = 50, projectId?: number | null) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (projectId != null) params.set('project_id', String(projectId));
+    return request<{ runs: TestRun[] }>(`/api/runs?${params}`);
+  },
+  getRun: (id: number, projectId?: number | null) => {
+    const params = new URLSearchParams();
+    if (projectId != null) params.set('project_id', String(projectId));
+    const qs = params.toString();
+    return request<{ run: TestRunDetail }>(
+      `/api/runs/${id}${qs ? `?${qs}` : ''}`
+    );
+  },
+  cancelRun: (id: number) =>
+    request<{ run: TestRun }>(`/api/runs/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  deleteRun: (id: number) =>
+    request<{ success: boolean }>(`/api/runs/${id}`, {
+      method: 'DELETE',
+    }),
   getPlugins: () => request<{ plugins: PluginInfo[] }>('/api/plugins'),
   updatePlugin: (
     id: PluginId,
     body: { installed: boolean; maxRetries?: number }
   ) =>
     request<{ plugins: PluginInfo[] }>(`/api/plugins/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  getSkills: () => request<{ skills: SkillInfo[] }>('/api/skills'),
+  updateSkill: (
+    id: SkillId,
+    body: {
+      installed: boolean;
+      autoBeforeEnqueue?: boolean;
+      createInJira?: boolean;
+      maxPages?: number;
+    }
+  ) =>
+    request<{ skills: SkillInfo[] }>(`/api/skills/${id}`, {
       method: 'PUT',
       body: JSON.stringify(body),
     }),

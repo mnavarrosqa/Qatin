@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Link } from 'react-router-dom';
 import { Icon } from './components/Icon';
 
 const OL_RE = /^(\d+)[.)]\s+(.*)$/;
@@ -39,7 +40,7 @@ function extractScreenshots(text: string): string[] {
 
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const parts = text.split(
-    /(\*\*[^*]+\*\*|`[^`]+`|\/screenshots\/[^\s)]+|[A-Z][A-Z0-9]+-\d+)/g
+    /(\*\*[^*]+\*\*|`[^`]+`|\/screenshots\/[^\s)]+|\/runs\?id=\d+|[A-Z][A-Z0-9]+-\d+)/g
   );
   return parts.map((part, i) => {
     const key = `${keyPrefix}-${i}`;
@@ -51,6 +52,13 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
     }
     if (part.startsWith('/screenshots/')) {
       return null;
+    }
+    if (/^\/runs\?id=\d+$/.test(part)) {
+      return (
+        <Link key={key} className="chat-inline-link" to={part}>
+          Ejecuciones
+        </Link>
+      );
     }
     if (/^[A-Z][A-Z0-9]+-\d+$/.test(part)) {
       return (

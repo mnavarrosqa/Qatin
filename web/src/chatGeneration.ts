@@ -10,6 +10,7 @@ export type ToolStep = {
   tool: string;
   detail?: string;
   status: 'running' | 'done';
+  data?: unknown;
 };
 
 export type UiMessage =
@@ -217,6 +218,7 @@ export async function startChatGeneration(opts: {
                   ...tools[i],
                   detail: ev.detail || tools[i].detail,
                   status: 'done',
+                  data: ev.data ?? tools[i].data,
                 };
                 break;
               }
