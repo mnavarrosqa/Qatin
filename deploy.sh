@@ -89,67 +89,23 @@ if [ ! -f "/agent/.env" ]; then
     echo -e "${RED}Please edit /agent/.env with your configuration before starting services!${NC}"
 fi
 
-echo -e "${GREEN}Installing systemd services...${NC}"
+echo -e "${GREEN}Stopping legacy systemd app units (if any)...${NC}"
+systemctl stop jira-qa-server.service 2>/dev/null || true
+systemctl stop jira-qa-worker@{1..3}.service 2>/dev/null || true
+systemctl disable jira-qa-server.service 2>/dev/null || true
+systemctl disable jira-qa-worker@{1..3}.service 2>/dev/null || true
 
-# Install server service
-cat > /etc/systemd/system/jira-qa-server.service << EOF
-[Unit]
-Description=Jira QA Agent API Server
-After=network.target redis-server.service
+echo -e "${GREEN}Starting app with PM2...${NC}"
+su - "$ACTUAL_USER" -c "cd /agent && npx pm2 delete ecosystem.config.cjs 2>/dev/null || true"
+su - "$ACTUAL_USER" -c "cd /agent && npx pm2 start ecosystem.config.cjs"
+su - "$ACTUAL_USER" -c "cd /agent && npx pm2 save"
 
-[Service]
-Type=simple
-User=$ACTUAL_USER
-WorkingDirectory=/agent
-Environment=NODE_ENV=production
-ExecStart=/usr/bin/node /agent/dist/server.js
-Restart=always
-RestartSec=10
-StandardOutput=append:/agent/logs/server.log
-StandardError=append:/agent/logs/server-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Install worker service (multiple instances)
-for i in {1..3}; do
-cat > /etc/systemd/system/jira-qa-worker@$i.service << EOF
-[Unit]
-Description=Jira QA Agent Worker #$i
-After=network.target redis-server.service jira-qa-server.service
-
-[Service]
-Type=simple
-User=$ACTUAL_USER
-WorkingDirectory=/agent
-Environment=NODE_ENV=production
-Environment=WORKER_ID=$i
-ExecStart=/usr/bin/node /agent/dist/worker.js
-Restart=always
-RestartSec=10
-StandardOutput=append:/agent/logs/worker-$i.log
-StandardError=append:/agent/logs/worker-$i-error.log
-
-[Install]
-WantedBy=multi-user.target
-EOF
-done
-
-# Reload systemd
-systemctl daemon-reload
-
-echo -e "${GREEN}Enabling services...${NC}"
-systemctl enable jira-qa-server.service
-systemctl enable jira-qa-worker@1.service
-systemctl enable jira-qa-worker@2.service
-systemctl enable jira-qa-worker@3.service
-
-echo -e "${GREEN}Starting services...${NC}"
-systemctl start jira-qa-server.service
-systemctl start jira-qa-worker@1.service
-systemctl start jira-qa-worker@2.service
-systemctl start jira-qa-worker@3.service
+# Ensure PM2 comes back after reboot (as the app user)
+STARTUP_CMD=$(su - "$ACTUAL_USER" -c "cd /agent && npx pm2 startup systemd -u $ACTUAL_USER --hp $USER_HOME" | grep -E 'sudo|env ' | tail -1 || true)
+if [ -n "$STARTUP_CMD" ]; then
+  echo -e "${GREEN}Configuring PM2 startup on boot...${NC}"
+  eval "$STARTUP_CMD"
+fi
 
 # Setup logrotate
 echo "Setting up log rotation..."
@@ -196,16 +152,13 @@ fi
 echo ""
 echo -e "${GREEN}✅ Deployment complete!${NC}"
 echo ""
-echo "Service status:"
-systemctl status jira-qa-server.service --no-pager
-echo ""
-echo "Worker status:"
-systemctl status jira-qa-worker@1.service --no-pager
+echo "PM2 status:"
+su - "$ACTUAL_USER" -c "cd /agent && npx pm2 status"
 echo ""
 echo -e "${YELLOW}Important next steps:${NC}"
 echo "1. Edit /agent/.env with your Jira and OpenAI credentials"
-echo "2. Restart services: sudo systemctl restart jira-qa-server jira-qa-worker@{1..3}"
-echo "3. Check logs: journalctl -u jira-qa-server -f"
+echo "2. Redeploy: cd /agent && npm run redeploy"
+echo "3. Logs: cd /agent && npx pm2 logs"
 echo "4. Test API: curl http://localhost:8545/health"
 echo ""
 echo -e "${GREEN}API will be available at: http://$(hostname -I | awk '{print $1}'):8545${NC}"

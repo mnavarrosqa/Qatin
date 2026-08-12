@@ -3,6 +3,8 @@ import {
   resolveLlmConfig,
   AgentMessage,
   LlmProvider,
+  PromptTier,
+  getPromptTier,
 } from '../llm';
 import {
   getChatSession,
@@ -17,6 +19,7 @@ import { QA_CHAT_TOOLS, QaChatToolRunner, ToolEventEmitter } from './qa-chat-too
 import { logger } from '../utils/logger';
 
 const MAX_ITERATIONS = 8;
+const AGENT_LLM_TIMEOUT_MS = 90_000;
 
 export type ChatAgentEvent =
   | { type: 'token'; text: string }
@@ -30,33 +33,21 @@ export type ChatAgentEvent =
     }
   | { type: 'error'; error: string };
 
-function buildSystemPrompt(opts: {
-  projectId: number | null;
-  projectName?: string | null;
-  projectCount: number;
-}): string {
-  const projectLine = opts.projectId
-    ? `Proyecto activo: id=${opts.projectId}${
-        opts.projectName ? ` (${opts.projectName})` : ''
-      }.`
-    : opts.projectCount === 0
-      ? 'No hay proyectos configurados. Pedile al usuario que cree uno en Proyectos (y LLM/Jira en Configuración) antes de analizar o probar.'
-      : 'Todavía no hay proyecto activo. Usá list_projects y preguntá cuál quieren, o set_active_project si lo nombran.';
+function formatProjectDirectory(
+  projects: ReturnType<typeof listProjects>
+): string {
+  if (!projects.length) return '(ninguno)';
+  return projects
+    .map(
+      (p) =>
+        `- id=${p.id} · ${p.name}` +
+        (p.jira_project_key ? ` · Jira ${p.jira_project_key}` : '') +
+        (p.base_url ? ` · ${p.base_url}` : '')
+    )
+    .join('\n');
+}
 
-  const custom = (getSetting('agent_chat_instructions') || '').trim();
-  const customBlock = custom
-    ? `
-
-## Custom user instructions
-Follow these with priority (without violating the rules above):
-${custom}`
-    : '';
-
-  return `You are the QA agent of Qatin. Answer in Spanish (argentino). Be clear and concise.
-
-Your job: understand tickets, design test cases, run them with Playwright, and report results.
-
-Workflow:
+const DEFAULT_CHAT_INSTRUCTIONS_FULL = `Workflow:
 1. User gives a ticket (Jira key or pasted text) → use fetch_ticket to get info → explain what the ticket asks, what to test, what risks you see.
 2. Use analyze_ticket to generate test cases (happy path + negative + edge cases). Show summary to user before proceeding.
 3. User approves → use save_test_cases to persist them.
@@ -65,15 +56,66 @@ Workflow:
 
 Rules:
 - Never invent ticket content. Always use fetch_ticket or analyze_ticket.
-- ${projectLine}
-- If no active project: use list_projects and ask which one.
 - If config is missing (no project, no base_url, no LLM, no Jira creds): say exactly what is missing and where to configure it (Settings or Projects page).
 - Respond in human-readable text, not raw JSON (unless user asks for technical detail).
 - Always include screenshot URLs (/screenshots/...) when available.
 - If a run fails: analyze whether it is an app bug, a broken test case (bad selector, ambiguous step), or a config issue.
 - If user pastes free text (not a ticket key): treat it as a feature description using fetch_ticket with pasted_summary + pasted_description.
 - Use list_recent_runs to give context on what was already tested.
-- Use lists, keep responses short. If the ticket is ambiguous, ask before generating cases.${customBlock}`;
+- Use lists, keep responses short. If the ticket is ambiguous, ask before generating cases.
+- If user asks for Xray export/import: output a complete CSV (Summary, Description, Test Type, Step, Data, Expected Result) ready to download/import. Do not invent ticket facts — use fetch_ticket / analyze_ticket / list_test_cases first.`;
+
+const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, save_test_cases, enqueue_run, get_run_status, list_projects, set_active_project, list_test_cases, list_recent_runs.
+
+Rules:
+- Never invent ticket content. Use fetch_ticket or analyze_ticket.
+- If config is missing: say what and where to fix it.
+- Include screenshot URLs (/screenshots/...) when available.
+- Pasted text (not a key): use fetch_ticket with pasted_summary + pasted_description.
+- Xray export: full CSV (Summary, Description, Test Type, Step, Data, Expected Result).
+- Keep responses short, use lists.`;
+
+export function getDefaultChatInstructions(tier: PromptTier): string {
+  return tier === 'compact'
+    ? DEFAULT_CHAT_INSTRUCTIONS_COMPACT
+    : DEFAULT_CHAT_INSTRUCTIONS_FULL;
+}
+
+function buildSystemPrompt(opts: {
+  projectId: number | null;
+  projectName?: string | null;
+  projectCount: number;
+  projectDirectory: string;
+  tier: PromptTier;
+}): string {
+  const projectLine = opts.projectId
+    ? `Active project: id=${opts.projectId}${
+        opts.projectName ? ` (${opts.projectName})` : ''
+      }.`
+    : opts.projectCount === 0
+      ? 'No projects configured. Ask user to create one in Projects (and set LLM/Jira in Settings).'
+      : 'No active project yet. If they only ask which projects exist, answer from the list below without calling tools. Otherwise ask which one or call set_active_project.';
+
+  const custom = (getSetting('agent_chat_instructions') || '').trim();
+  const instructions = custom || getDefaultChatInstructions(opts.tier);
+
+  const header = opts.tier === 'compact'
+    ? `You are Qatin's QA agent. Answer in Spanish (argentino). Be concise.
+
+Job: understand tickets, create test cases, run Playwright tests, report results.`
+    : `You are the QA agent of Qatin. Answer in Spanish (argentino). Be clear and concise.
+
+Your job: understand tickets, design test cases, run them with Playwright, and report results.`;
+
+  return `${header}
+
+Configured projects:
+${opts.projectDirectory}
+
+- ${projectLine}
+- If the user only asks which projects exist, answer from the list above. Do not call list_projects unless you need fresh fields.
+
+${instructions}`;
 }
 
 function historyToAgentMessages(
@@ -110,6 +152,52 @@ function historyToAgentMessages(
   return messages;
 }
 
+function friendlyLlmError(error: unknown): string {
+  const raw =
+    (error as any)?.message ||
+    'Falló el agente de chat. Revisá el LLM y reintentá.';
+  if (/timed out|timeout|AbortError/i.test(raw)) {
+    return 'El modelo tardó demasiado en responder (timeout). En Configuración probá hermes3:latest, o desactivá el “thinking” si usás qwen3.x.';
+  }
+  if (/model .* not found|404/i.test(raw)) {
+    return `El modelo configurado no está en Ollama (${raw}). En Configuración elegí uno instalado (ej. hermes3:latest) o corré \`ollama pull <modelo>\`.`;
+  }
+  return raw;
+}
+
+function isProjectsInventoryQuestion(text: string): boolean {
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  const asksProjects =
+    /\bproyectos?\b/.test(t) ||
+    /\bprojects?\b/.test(t);
+  const asksList =
+    /\b(qué|que|cuales|cuáles|cuantos|cuántos|lista|listá|liste|mostrar|mostrá|tengo|hay|configurad)\b/.test(
+      t
+    ) || /what projects|list projects|which projects/.test(t);
+  const looksLikeTicketWork =
+    /\b([a-z][a-z0-9]+-\d+)\b/i.test(t) ||
+    /\b(probar|testear|analizar|ejecutar|ticket|caso)\b/.test(t);
+  return asksProjects && asksList && !looksLikeTicketWork;
+}
+
+function answerProjectsInventory(
+  projects: ReturnType<typeof listProjects>
+): string {
+  if (!projects.length) {
+    return 'No tenés proyectos configurados todavía. Creá uno en Proyectos y volvé.';
+  }
+  const lines = projects.map((p) => {
+    const bits = [
+      `**${p.name}** (id ${p.id})`,
+      p.jira_project_key ? `Jira \`${p.jira_project_key}\`` : null,
+      p.base_url || null,
+    ].filter(Boolean);
+    return `- ${bits.join(' · ')}`;
+  });
+  return `Tenés ${projects.length} proyecto${projects.length === 1 ? '' : 's'} configurado${projects.length === 1 ? '' : 's'}:\n\n${lines.join('\n')}\n\nElegí uno en el selector de arriba o decime cuál querés usar.`;
+}
+
 export async function runQaChatTurn(opts: {
   sessionId: number;
   userMessage: string;
@@ -138,6 +226,30 @@ export async function runQaChatTurn(opts: {
   }
 
   const projects = listProjects();
+  const projectDirectory = formatProjectDirectory(projects);
+
+  // Fast path: listing projects does not need the LLM (avoids Ollama tool stalls).
+  if (isProjectsInventoryQuestion(userMessage)) {
+    const msg = answerProjectsInventory(projects);
+    createChatMessage({
+      session_id: sessionId,
+      role: 'assistant',
+      content: msg,
+    });
+    onEvent({ type: 'token', text: msg });
+    const endSession = getChatSession(sessionId)!;
+    onEvent({
+      type: 'done',
+      message: msg,
+      session: {
+        id: endSession.id,
+        project_id: endSession.project_id,
+        title: endSession.title,
+      },
+    });
+    return;
+  }
+
   let projectName: string | null = null;
   let llmPartial: { provider?: LlmProvider; model?: string; baseUrl?: string } =
     {};
@@ -155,9 +267,11 @@ export async function runQaChatTurn(opts: {
   }
 
   let client;
+  let tier: PromptTier = 'full';
   try {
     const config = resolveLlmConfig(llmPartial);
-    client = createLlmClient(config);
+    tier = getPromptTier(config.provider, config.model);
+    client = createLlmClient(config, { timeoutMs: AGENT_LLM_TIMEOUT_MS });
   } catch (error: any) {
     const msg =
       error?.message ||
@@ -215,12 +329,15 @@ export async function runQaChatTurn(opts: {
         projectId: refreshed.project_id,
         projectName,
         projectCount: projects.length,
+        projectDirectory,
+        tier,
       }),
     },
     ...historyToAgentMessages(listChatMessages(sessionId)),
   ];
 
   let finalText = '';
+  onEvent({ type: 'progress', detail: 'Consultando al modelo…' });
 
   try {
     for (let i = 0; i < MAX_ITERATIONS; i++) {
@@ -266,7 +383,6 @@ export async function runQaChatTurn(opts: {
           });
         }
 
-        // Refresh system project line after set_active_project
         const latest = getChatSession(sessionId)!;
         if (latest.project_id !== refreshed.project_id) {
           const p = latest.project_id ? getProject(latest.project_id) : null;
@@ -276,10 +392,13 @@ export async function runQaChatTurn(opts: {
               projectId: latest.project_id,
               projectName: p?.name || null,
               projectCount: projects.length,
+              projectDirectory,
+              tier,
             }),
           };
         }
 
+        onEvent({ type: 'progress', detail: 'Procesando herramientas…' });
         continue;
       }
 
@@ -319,13 +438,23 @@ export async function runQaChatTurn(opts: {
     });
   } catch (error: any) {
     logger.error('QaChatAgent turn failed', error);
-    const msg =
-      error?.message || 'Falló el agente de chat. Revisá el LLM y reintentá.';
+    const msg = friendlyLlmError(error);
     createChatMessage({
       session_id: sessionId,
       role: 'assistant',
       content: msg,
     });
+    onEvent({ type: 'token', text: msg });
     onEvent({ type: 'error', error: msg });
+    const endSession = getChatSession(sessionId)!;
+    onEvent({
+      type: 'done',
+      message: msg,
+      session: {
+        id: endSession.id,
+        project_id: endSession.project_id,
+        title: endSession.title,
+      },
+    });
   }
 }

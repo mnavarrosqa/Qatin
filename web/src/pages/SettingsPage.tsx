@@ -48,15 +48,22 @@ export function SettingsPage() {
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [promptDefaults, setPromptDefaults] = useState<{
+    agent_chat_instructions: string;
+    agent_analyzer_instructions: string;
+  } | null>(null);
+  const [promptTier, setPromptTier] = useState<'full' | 'compact'>('full');
 
   const mcpConnected = settings.use_mcp === 'true';
 
   useEffect(() => {
-    Promise.all([api.getSettings(), api.getProviders(), api.getPlugins()])
-      .then(([s, p, pl]) => {
+    Promise.all([api.getSettings(), api.getProviders(), api.getPlugins(), api.getAgentPrompts()])
+      .then(([s, p, pl, ap]) => {
         setSettings(s.settings);
         setProviders(p.providers);
         setPlugins(pl.plugins);
+        setPromptDefaults(ap.defaults);
+        setPromptTier(ap.tier);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -508,8 +515,14 @@ export function SettingsPage() {
         {tab === 'agents' && (
           <div role="tabpanel" id="panel-agents" aria-labelledby="tab-agents">
             <p className="panel-lead">
-              Pegá cómo querés que se comporten los agentes. Se suman al prompt
-              base del sistema; si dejás vacío, usan solo el default.
+              Instrucciones que usan los agentes. Podés editarlas para cambiar
+              el comportamiento. Si las borrás completamente, vuelven al default.
+            </p>
+            <p className="hint" style={{ marginBottom: '1rem' }}>
+              Tier activo: <strong>{promptTier}</strong>{' '}
+              {promptTier === 'compact'
+                ? '(modelo chico — prompts cortos)'
+                : '(modelo potente — prompts completos)'}
             </p>
             <form onSubmit={saveAgents}>
               <div className="field">
@@ -519,24 +532,19 @@ export function SettingsPage() {
                 <textarea
                   id="agent_chat_instructions"
                   className="agent-instructions"
-                  value={settings.agent_chat_instructions || ''}
+                  value={
+                    settings.agent_chat_instructions ||
+                    promptDefaults?.agent_chat_instructions ||
+                    ''
+                  }
                   onChange={(e) =>
                     set('agent_chat_instructions', e.target.value)
                   }
-                  placeholder={`Instrucciones adicionales para el agente de chat. Ejemplos:
-
-Siempre pedí el ticket key antes de analizar.
-Priorizá regresiones en login, checkout y pagos.
-Si hay dudas en el ticket, preguntá antes de generar casos.
-Antes de encolar un run, mostrá los casos y pedí confirmación.
-Cuando un run falle, sugerí si es bug de la app o del caso.
-No analices más de un ticket por mensaje.
-Respondé en tono directo, sin rodeos.`}
-                  rows={10}
+                  rows={14}
                 />
                 <p className="hint">
-                  Define tono, prioridades, reglas de negocio y qué hacer (o no
-                  hacer) en el chat.
+                  Define workflow, reglas y tono del agente de chat. Editá
+                  libremente; se usa tal cual como instrucciones del agente.
                 </p>
               </div>
 
@@ -547,24 +555,19 @@ Respondé en tono directo, sin rodeos.`}
                 <textarea
                   id="agent_analyzer_instructions"
                   className="agent-instructions"
-                  value={settings.agent_analyzer_instructions || ''}
+                  value={
+                    settings.agent_analyzer_instructions ||
+                    promptDefaults?.agent_analyzer_instructions ||
+                    ''
+                  }
                   onChange={(e) =>
                     set('agent_analyzer_instructions', e.target.value)
                   }
-                  placeholder={`Instrucciones adicionales para el analizador. Ejemplos:
-
-Siempre incluí un caso de accesibilidad (navegación por teclado, contraste, aria-labels).
-Usá data-testid con prefijo app- (ej: [data-testid="app-submit-btn"]).
-No generes más de 6 escenarios salvo tickets críticos.
-Priorizá flujos mobile-first y responsive.
-En formularios, siempre probá: campo vacío, dato inválido, dato válido, y largo máximo.
-Para features con roles, incluí un caso por cada rol afectado.
-Si el ticket menciona una API, incluí verificación del response en Network.`}
-                  rows={10}
+                  rows={18}
                 />
                 <p className="hint">
-                  Guía cómo arma la estrategia y los casos de prueba a partir
-                  del ticket.
+                  Define reglas de calidad, cobertura y formato de los casos de
+                  prueba generados.
                 </p>
               </div>
 
@@ -574,6 +577,24 @@ Si el ticket menciona una API, incluí verificación del response en Network.`}
               <div className="actions">
                 <button className="btn" type="submit">
                   Guardar instrucciones
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  onClick={() => {
+                    if (promptDefaults) {
+                      set(
+                        'agent_chat_instructions',
+                        promptDefaults.agent_chat_instructions
+                      );
+                      set(
+                        'agent_analyzer_instructions',
+                        promptDefaults.agent_analyzer_instructions
+                      );
+                    }
+                  }}
+                >
+                  Restaurar defaults
                 </button>
               </div>
             </form>

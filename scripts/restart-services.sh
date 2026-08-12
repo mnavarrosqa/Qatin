@@ -1,15 +1,11 @@
 #!/bin/bash
 
-# Restart all Jira QA Agent services
+# Restart all Qatin processes via PM2
 
-echo "🔄 Restarting Jira QA Agent services..."
+echo "🔄 Restarting Qatin (PM2)…"
 
-sudo systemctl restart jira-qa-server
-sudo systemctl restart jira-qa-worker@1
-sudo systemctl restart jira-qa-worker@2
-sudo systemctl restart jira-qa-worker@3
+npx pm2 restart ecosystem.config.cjs
 
-echo "✅ Services restarted"
+echo "✅ Restarted"
 echo ""
-echo "Status:"
-./scripts/check-status.sh
+npx pm2 status

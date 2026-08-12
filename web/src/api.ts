@@ -229,6 +229,16 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify(body),
     }),
+  getAgentPrompts: () =>
+    request<{
+      tier: 'full' | 'compact';
+      provider: string | null;
+      model: string | null;
+      defaults: {
+        agent_chat_instructions: string;
+        agent_analyzer_instructions: string;
+      };
+    }>('/api/agent-prompts'),
   listChatSessions: (limit = 50) =>
     request<{ sessions: ChatSession[] }>(`/api/chat/sessions?limit=${limit}`),
   createChatSession: (body?: { project_id?: number | null; title?: string }) =>

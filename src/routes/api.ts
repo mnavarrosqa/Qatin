@@ -31,7 +31,7 @@ import {
 } from '../db';
 import { testQueue } from '../queue';
 import { logger } from '../utils/logger';
-import { PROVIDER_DEFAULTS, LlmProvider, testLlmConnection, providerApiKeySetting, readProviderProfile } from '../llm';
+import { PROVIDER_DEFAULTS, LlmProvider, testLlmConnection, providerApiKeySetting, readProviderProfile, resolveLlmConfig, getPromptTier } from '../llm';
 import {
   listPlugins,
   updatePluginConfig,
@@ -42,9 +42,10 @@ import {
   TicketAnalyzer,
   createSyntheticTicket,
   TestStrategy,
+  getDefaultAnalyzerInstructions,
 } from '../agents/ticket-analyzer';
 import { getJiraClient } from '../clients/jira-mcp-client';
-import { runQaChatTurn } from '../agents/qa-chat-agent';
+import { runQaChatTurn, getDefaultChatInstructions } from '../agents/qa-chat-agent';
 
 const router = Router();
 
@@ -309,6 +310,32 @@ router.put('/settings', (req, res) => {
     }
     logger.error('Error updating settings:', error);
     res.status(500).json({ error: 'Error interno del servidor' });
+  }
+});
+
+router.get('/agent-prompts', (_req, res) => {
+  try {
+    const config = resolveLlmConfig();
+    const tier = getPromptTier(config.provider, config.model);
+    res.json({
+      tier,
+      provider: config.provider,
+      model: config.model,
+      defaults: {
+        agent_chat_instructions: getDefaultChatInstructions(tier),
+        agent_analyzer_instructions: getDefaultAnalyzerInstructions(tier),
+      },
+    });
+  } catch {
+    res.json({
+      tier: 'full',
+      provider: null,
+      model: null,
+      defaults: {
+        agent_chat_instructions: getDefaultChatInstructions('full'),
+        agent_analyzer_instructions: getDefaultAnalyzerInstructions('full'),
+      },
+    });
   }
 });
 
@@ -935,16 +962,31 @@ router.post('/chat/sessions/:id/messages', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders?.();
+
+  const flush = () => {
+    (res as any).flush?.();
+  };
 
   const send = (event: string, data: unknown) => {
     res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    flush();
   };
 
   let closed = false;
   req.on('close', () => {
     closed = true;
   });
+
+  // Keep proxies/browsers from buffering the stream during long LLM waits
+  res.write(': connected\n\n');
+  flush();
+  const heartbeat = setInterval(() => {
+    if (closed) return;
+    res.write(`: ping ${Date.now()}\n\n`);
+    flush();
+  }, 2000);
 
   try {
     await runQaChatTurn({
@@ -981,6 +1023,7 @@ router.post('/chat/sessions/:id/messages', async (req, res) => {
       send('error', { error: error?.message || 'Error del agente' });
     }
   } finally {
+    clearInterval(heartbeat);
     if (!closed) res.end();
   }
 });

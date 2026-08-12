@@ -112,6 +112,8 @@ export function createLlmClient(
     baseUrl: provider === 'openai' ? undefined : baseUrl,
     // Ollama's OpenAI shim varies by version; prompts already request JSON
     supportsJsonFormat: provider !== 'ollama',
+    // qwen3.x thinking mode stalls / empties tool calls via the OpenAI shim
+    disableThinking: provider === 'ollama',
     timeoutMs: opts?.timeoutMs,
   });
 }

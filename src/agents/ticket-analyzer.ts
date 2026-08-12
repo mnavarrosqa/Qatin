@@ -1,7 +1,53 @@
 import { logger } from '../utils/logger';
 import { JiraIssue } from '../clients/jira-client';
-import { createLlmClient, resolveLlmConfig, LlmConfig } from '../llm';
+import { createLlmClient, resolveLlmConfig, LlmConfig, getPromptTier, PromptTier } from '../llm';
 import { getSetting } from '../db';
+
+const DEFAULT_ANALYZER_INSTRUCTIONS_FULL = `Quality rules:
+- description: what behavior is validated and why it matters.
+- steps: concrete ordered actions. Use verbs the executor understands: "Navegar a", "Hacer click en", "Completar el campo", "Esperar", "Verificar que", "Seleccionar", "Hacer scroll", "Hover sobre". Include the selector or text in single quotes: "Hacer click en 'Guardar'".
+- expectedResults: verifiable assertions (visible text, URL, UI state, error message, redirect). Prefer 1 assertion per key step.
+- Use realistic test data (emails, IDs, amounts, dates) coherent with the ticket domain.
+- Selector priority: [data-testid] > [role] with name > [name] > [id] > tag by type. Avoid fragile selectors like div:nth-child or generated CSS classes.
+- URLs: use {{BASE_URL}} with realistic paths from the ticket.
+
+Coverage (unless the ticket is trivial):
+1. Happy path: complete main flow.
+2. Negative case: invalid data, empty field, missing permission, cancel.
+3. Edge case: boundary values, unexpected prior state, special characters.
+4. If multiple acceptance criteria exist, cover each one.
+
+Generate 4-8 scenarios. Each must be independently executable.
+
+Ticket type focus:
+- New feature: full flow + input validations + empty states.
+- Bug fix: TC-01 reproduces the bug, TC-02 verifies the fix, add regression.
+- UI improvement: visual change + interaction + do not break existing flows.
+- Refactor: regression only — affected flows must still work.
+
+Auth: if login is needed, first step navigates to login and enters test credentials. Use standard selectors: input[type="email"], input[type="password"], button[type="submit"]. Write "Iniciar sesión con el usuario QA del proyecto" — the executor injects configured credentials.
+
+Do NOT:
+- Generate generic "Verify page loads" cases without tying them to the ticket.
+- Repeat cases with slightly different data unless justified (e.g. different roles).
+- Assume magic navigation: every case starts from a concrete URL.
+- Leave ambiguous steps like "Complete the form" without specifying fields and data.`;
+
+const DEFAULT_ANALYZER_INSTRUCTIONS_COMPACT = `Rules:
+- steps: use action verbs: "Navegar a", "Hacer click en", "Completar el campo", "Esperar", "Verificar que".
+- expectedResults: verifiable assertions (visible text, URL, UI state, error).
+- Selectors: prefer [data-testid], [role], [name], [id]. Avoid div:nth-child.
+- URLs: use {{BASE_URL}} with paths from the ticket.
+- Coverage: happy path + negative case + edge case. Generate 3-6 scenarios.
+- Each scenario must be independently executable.
+- If login is needed, first step: "Iniciar sesión con el usuario QA del proyecto".
+- No generic smoke tests. Every case must trace to the ticket.`;
+
+export function getDefaultAnalyzerInstructions(tier: PromptTier): string {
+  return tier === 'compact'
+    ? DEFAULT_ANALYZER_INSTRUCTIONS_COMPACT
+    : DEFAULT_ANALYZER_INSTRUCTIONS_FULL;
+}
 
 export interface TestStrategy {
   testType: 'ui' | 'api' | 'manual' | 'mixed';
@@ -133,50 +179,26 @@ export class TicketAnalyzer {
     }
   }
 
+  private get tier(): PromptTier {
+    return getPromptTier(this.llmConfig.provider, this.llmConfig.model);
+  }
+
   private buildSystemPrompt(): string {
     const custom = (getSetting('agent_analyzer_instructions') || '').trim();
-    const customBlock = custom
-      ? `
+    const instructions = custom || getDefaultAnalyzerInstructions(this.tier);
 
-## Custom user instructions
-Follow these with priority (without violating quality rules or JSON format):
-${custom}`
-      : '';
-
-    return `You are a senior QA lead designing Playwright-automatable test cases.
+    const header = this.tier === 'compact'
+      ? `You are a QA lead. Design Playwright test cases for the given ticket.
+Write description, steps, expectedResults in Spanish (argentino). JSON keys and selectors in English.
+Respond with ONLY valid JSON.`
+      : `You are a senior QA lead designing Playwright-automatable test cases.
 Write human text (description, steps, expectedResults) in Spanish (argentino). JSON keys and CSS selectors in English.
 Do NOT produce generic smoke tests. Every case must trace to the ticket's summary, description, or acceptance criteria.
-Respond with ONLY valid JSON, no markdown fences.
+Respond with ONLY valid JSON, no markdown fences.`;
 
-Quality rules:
-- description: what behavior is validated and why it matters.
-- steps: concrete ordered actions. Use verbs the executor understands: "Navegar a", "Hacer click en", "Completar el campo", "Esperar", "Verificar que", "Seleccionar", "Hacer scroll", "Hover sobre". Include the selector or text in single quotes: "Hacer click en 'Guardar'".
-- expectedResults: verifiable assertions (visible text, URL, UI state, error message, redirect). Prefer 1 assertion per key step.
-- Use realistic test data (emails, IDs, amounts, dates) coherent with the ticket domain.
-- Selector priority: [data-testid] > [role] with name > [name] > [id] > tag by type. Avoid fragile selectors like div:nth-child or generated CSS classes.
-- URLs: use {{BASE_URL}} with realistic paths from the ticket.
+    return `${header}
 
-Coverage (unless the ticket is trivial):
-1. Happy path: complete main flow.
-2. Negative case: invalid data, empty field, missing permission, cancel.
-3. Edge case: boundary values, unexpected prior state, special characters.
-4. If multiple acceptance criteria exist, cover each one.
-
-Generate 4-8 scenarios. Each must be independently executable.
-
-Ticket type focus:
-- New feature: full flow + input validations + empty states.
-- Bug fix: TC-01 reproduces the bug, TC-02 verifies the fix, add regression.
-- UI improvement: visual change + interaction + do not break existing flows.
-- Refactor: regression only — affected flows must still work.
-
-Auth: if login is needed, first step navigates to login and enters test credentials. Use standard selectors: input[type="email"], input[type="password"], button[type="submit"]. Write "Iniciar sesión con el usuario QA del proyecto" — the executor injects configured credentials.
-
-Do NOT:
-- Generate generic "Verify page loads" cases without tying them to the ticket.
-- Repeat cases with slightly different data unless justified (e.g. different roles).
-- Assume magic navigation: every case starts from a concrete URL.
-- Leave ambiguous steps like "Complete the form" without specifying fields and data.${customBlock}`;
+${instructions}`;
   }
 
   private buildAnalysisPrompt(

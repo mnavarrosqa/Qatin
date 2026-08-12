@@ -2,6 +2,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
@@ -10,24 +11,16 @@ import {
   api,
   type ChatMessage,
   type ChatSession,
-  type ChatSseEvent,
   type Project,
 } from '../api';
-
-type ToolStep = {
-  tool: string;
-  detail?: string;
-  status: 'running' | 'done';
-};
-
-type UiMessage =
-  | { kind: 'user'; id: string; content: string }
-  | {
-      kind: 'assistant';
-      id: string;
-      content: string;
-      tools?: ToolStep[];
-    };
+import {
+  getChatGeneration,
+  startChatGeneration,
+  stopChatGeneration,
+  subscribeChatGeneration,
+  type UiMessage,
+} from '../chatGeneration';
+import { getFollowUps } from '../chatFollowUps';
 
 const SUGGESTIONS = [
   {
@@ -116,63 +109,169 @@ function renderInline(text: string, keyPrefix: string) {
   });
 }
 
-function MessageBody({ text }: { text: string }) {
+type ContentBlock =
+  | { type: 'heading'; level: 2 | 3; text: string }
+  | { type: 'para'; text: string }
+  | { type: 'ul'; items: string[] }
+  | { type: 'ol'; items: string[] }
+  | { type: 'code'; text: string };
+
+function parseBlocks(text: string): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  const fenceSplit = text.split(/(```[\s\S]*?```)/g);
+
+  for (const chunk of fenceSplit) {
+    if (!chunk) continue;
+    if (chunk.startsWith('```') && chunk.endsWith('```')) {
+      const inner = chunk.slice(3, -3).replace(/^\w*\n?/, '');
+      blocks.push({ type: 'code', text: inner.replace(/\n$/, '') });
+      continue;
+    }
+
+    const paragraphs = chunk.split(/\n{2,}/);
+    for (const para of paragraphs) {
+      const trimmed = para.trim();
+      if (!trimmed) continue;
+
+      const lines = trimmed.split('\n');
+      const nonEmpty = lines.filter((l) => l.trim());
+
+      if (/^#{2,3}\s+/.test(trimmed) && nonEmpty.length === 1) {
+        const level = trimmed.startsWith('###') ? 3 : 2;
+        blocks.push({
+          type: 'heading',
+          level,
+          text: trimmed.replace(/^#{2,3}\s+/, ''),
+        });
+        continue;
+      }
+
+      const isUl = nonEmpty.every((l) => /^[-*•]\s+/.test(l.trim()));
+      if (isUl && nonEmpty.length) {
+        blocks.push({
+          type: 'ul',
+          items: nonEmpty.map((l) => l.trim().replace(/^[-*•]\s+/, '')),
+        });
+        continue;
+      }
+
+      const isOl = nonEmpty.every((l) => /^\d+[.)]\s+/.test(l.trim()));
+      if (isOl && nonEmpty.length) {
+        blocks.push({
+          type: 'ol',
+          items: nonEmpty.map((l) => l.trim().replace(/^\d+[.)]\s+/, '')),
+        });
+        continue;
+      }
+
+      blocks.push({ type: 'para', text: trimmed });
+    }
+  }
+
+  return blocks;
+}
+
+function MessageBody({
+  text,
+  streaming = false,
+}: {
+  text: string;
+  streaming?: boolean;
+}) {
   const shots = extractScreenshots(text);
   const cleaned = text
     .replace(/\/screenshots\/[^\s)]+/g, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 
-  const paragraphs = cleaned ? cleaned.split(/\n{2,}/) : [];
+  const blocks = cleaned ? parseBlocks(cleaned) : [];
 
   return (
     <div className="chat-content">
-      {paragraphs.map((para, pi) => {
-        const lines = para.split('\n');
-        const isList = lines.every((l) => /^[-*•]\s+/.test(l.trim()) || !l.trim());
-        if (isList && lines.some((l) => l.trim())) {
+      {blocks.map((block, bi) => {
+        const key = `b-${bi}`;
+        if (block.type === 'heading') {
+          const Tag = block.level === 3 ? 'h4' : 'h3';
           return (
-            <ul key={pi} className="chat-list">
-              {lines
-                .filter((l) => l.trim())
-                .map((l, li) => (
-                  <li key={li}>{renderInline(l.replace(/^[-*•]\s+/, ''), `${pi}-${li}`)}</li>
-                ))}
+            <Tag key={key} className={`chat-heading chat-heading-${block.level}`}>
+              {renderInline(block.text, key)}
+            </Tag>
+          );
+        }
+        if (block.type === 'code') {
+          return (
+            <pre key={key} className="chat-code">
+              <code>{block.text}</code>
+            </pre>
+          );
+        }
+        if (block.type === 'ul') {
+          return (
+            <ul key={key} className="chat-list">
+              {block.items.map((item, li) => (
+                <li key={li}>{renderInline(item, `${key}-${li}`)}</li>
+              ))}
             </ul>
           );
         }
+        if (block.type === 'ol') {
+          return (
+            <ol key={key} className="chat-list chat-list-ol">
+              {block.items.map((item, li) => (
+                <li key={li}>{renderInline(item, `${key}-${li}`)}</li>
+              ))}
+            </ol>
+          );
+        }
+        const lines = block.text.split('\n');
         return (
-          <p key={pi} className="chat-para">
+          <p key={key} className="chat-para">
             {lines.map((line, li) => (
               <span key={li}>
                 {li > 0 && <br />}
-                {renderInline(line, `${pi}-${li}`)}
+                {renderInline(line, `${key}-${li}`)}
               </span>
             ))}
           </p>
         );
       })}
+      {streaming && <span className="chat-stream-caret" aria-hidden />}
       {shots.length > 0 && (
         <div className="chat-shots">
-          {shots.map((url) => (
-            <a
-              key={url}
-              className="chat-shot-link"
-              href={url}
-              target="_blank"
-              rel="noreferrer"
-              title="Abrir evidencia"
-            >
-              <img className="chat-shot" src={url} alt="Evidencia de test" />
-            </a>
-          ))}
+          <p className="chat-shots-label">Evidencias</p>
+          <div className="chat-shots-grid">
+            {shots.map((url, i) => (
+              <a
+                key={url}
+                className="chat-shot-link"
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                title="Abrir evidencia"
+              >
+                <img
+                  className="chat-shot"
+                  src={url}
+                  alt={`Evidencia ${i + 1}`}
+                  loading="lazy"
+                />
+                <span className="chat-shot-cap">Ver completa</span>
+              </a>
+            ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-export function ChatPage() {
+export function ChatPage({ active = true }: { active?: boolean }) {
+  const generation = useSyncExternalStore(
+    subscribeChatGeneration,
+    getChatGeneration,
+    getChatGeneration
+  );
+
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeId, setActiveId] = useState<number | null>(null);
@@ -187,11 +286,32 @@ export function ChatPage() {
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const bootstrappedRef = useRef(false);
+
+  const liveForActive =
+    generation && (activeId == null || generation.sessionId === activeId)
+      ? generation
+      : null;
+  const viewMessages = liveForActive ? liveForActive.messages : messages;
+  const viewBusy = liveForActive ? liveForActive.busy : busy;
+  const viewSession = liveForActive?.session || session;
+  const viewError = error;
+
+  // Keep local mirrors in sync so session switches / reloads stay consistent
+  useEffect(() => {
+    if (!liveForActive) return;
+    setMessages(liveForActive.messages);
+    setBusy(liveForActive.busy);
+    if (liveForActive.error) setError(liveForActive.error);
+    if (liveForActive.session) {
+      setSession(liveForActive.session);
+      if (activeId == null) setActiveId(liveForActive.sessionId);
+    }
+  }, [liveForActive, activeId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [messages, busy]);
+  }, [viewMessages, viewBusy]);
 
   useEffect(() => {
     const el = inputRef.current;
@@ -207,21 +327,39 @@ export function ChatPage() {
   }
 
   async function openSession(id: number) {
+    const live = getChatGeneration();
+    if (live && live.sessionId === id) {
+      setActiveId(id);
+      setSession(live.session);
+      setSelectedProjectId(live.session?.project_id ?? '');
+      setMessages(live.messages);
+      setBusy(live.busy);
+      setError(live.error || '');
+      setSessionsOpen(false);
+      return;
+    }
+
     const res = await api.getChatSession(id);
     setActiveId(id);
     setSession(res.session);
     setSelectedProjectId(res.session.project_id ?? '');
     setMessages(toUiMessages(res.messages));
+    setBusy(false);
     setError('');
     setSessionsOpen(false);
-    requestAnimationFrame(() => inputRef.current?.focus());
+    requestAnimationFrame(() => {
+      if (inputRef.current && active) inputRef.current.focus();
+    });
   }
 
   async function bootstrap() {
+    if (bootstrappedRef.current) return;
+    bootstrappedRef.current = true;
     setLoading(true);
     setError('');
     let loadError = '';
     try {
+      const live = getChatGeneration();
       const projResult = await api.listProjects().catch((e: Error) => {
         loadError = e.message;
         return { projects: [] as Project[] };
@@ -233,12 +371,21 @@ export function ChatPage() {
         return { sessions: [] as ChatSession[] };
       });
       setSessions(sessResult.sessions);
-      if (sessResult.sessions.length) {
+
+      if (live) {
+        setActiveId(live.sessionId);
+        setSession(live.session);
+        setSelectedProjectId(live.session?.project_id ?? '');
+        setMessages(live.messages);
+        setBusy(live.busy);
+        if (live.error) setError(live.error);
+      } else if (sessResult.sessions.length) {
         await openSession(sessResult.sessions[0].id);
       }
       if (loadError) setError(loadError);
     } catch (e: any) {
       setError(e.message);
+      bootstrappedRef.current = false;
     } finally {
       setLoading(false);
     }
@@ -246,8 +393,35 @@ export function ChatPage() {
 
   useEffect(() => {
     bootstrap();
-    return () => abortRef.current?.abort();
   }, []);
+
+  // When returning to chat, sync from server if the turn already finished
+  const wasActiveRef = useRef(active);
+  useEffect(() => {
+    const becameActive = active && !wasActiveRef.current;
+    wasActiveRef.current = active;
+    if (!becameActive || !activeId) return;
+
+    const live = getChatGeneration();
+    if (live?.busy && live.sessionId === activeId) return;
+
+    let cancelled = false;
+    api
+      .getChatSession(activeId)
+      .then((res) => {
+        if (cancelled) return;
+        const stillLive = getChatGeneration();
+        if (stillLive?.busy && stillLive.sessionId === activeId) return;
+        setSession(res.session);
+        setSelectedProjectId(res.session.project_id ?? '');
+        setMessages(toUiMessages(res.messages));
+        setBusy(false);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [active, activeId]);
 
   async function ensureSession(preferredProjectId?: number | null) {
     if (activeId) return activeId;
@@ -300,6 +474,7 @@ export function ChatPage() {
           setSession(null);
           setSelectedProjectId('');
           setMessages([]);
+          setBusy(false);
         }
       }
     } catch (e: any) {
@@ -348,131 +523,46 @@ export function ChatPage() {
   }
 
   function stopGeneration() {
-    abortRef.current?.abort();
+    stopChatGeneration();
     setBusy(false);
   }
 
-  async function onSubmit(e?: FormEvent) {
-    e?.preventDefault();
-    const content = input.trim();
-    if (!content || busy) return;
+  async function sendMessage(raw: string) {
+    const content = raw.trim();
+    if (!content || viewBusy) return;
 
     setError('');
     setInput('');
 
     try {
       const sessionId = await ensureSession();
-      const userMsg: UiMessage = {
-        kind: 'user',
-        id: `u-${Date.now()}`,
-        content,
-      };
-      const assistantId = `a-${Date.now()}`;
-      setMessages((prev) => [
-        ...prev,
-        userMsg,
-        { kind: 'assistant', id: assistantId, content: '', tools: [] },
-      ]);
-      setBusy(true);
-
-      abortRef.current?.abort();
-      const controller = new AbortController();
-      abortRef.current = controller;
-
-      await api.sendChatMessage(
+      await startChatGeneration({
         sessionId,
         content,
-        (ev: ChatSseEvent) => {
-          if (ev.type === 'token') {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId && m.kind === 'assistant'
-                  ? { ...m, content: ev.text }
-                  : m
-              )
-            );
-          } else if (ev.type === 'tool_start') {
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== assistantId || m.kind !== 'assistant') return m;
-                return {
-                  ...m,
-                  tools: [
-                    ...(m.tools || []),
-                    {
-                      tool: ev.tool,
-                      detail: ev.detail,
-                      status: 'running' as const,
-                    },
-                  ],
-                };
-              })
-            );
-          } else if (ev.type === 'tool_end') {
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== assistantId || m.kind !== 'assistant') return m;
-                const tools = [...(m.tools || [])];
-                for (let i = tools.length - 1; i >= 0; i--) {
-                  if (tools[i].tool === ev.tool && tools[i].status === 'running') {
-                    tools[i] = {
-                      ...tools[i],
-                      detail: ev.detail || tools[i].detail,
-                      status: 'done',
-                    };
-                    break;
-                  }
-                }
-                return { ...m, tools };
-              })
-            );
-          } else if (ev.type === 'progress') {
-            setMessages((prev) =>
-              prev.map((m) => {
-                if (m.id !== assistantId || m.kind !== 'assistant') return m;
-                const tools = [...(m.tools || [])];
-                const last = tools[tools.length - 1];
-                if (last) {
-                  tools[tools.length - 1] = {
-                    ...last,
-                    detail: ev.detail || last.detail,
-                  };
-                }
-                return { ...m, tools };
-              })
-            );
-          } else if (ev.type === 'done') {
-            setSession((s) =>
-              s
-                ? {
-                    ...s,
-                    project_id: ev.session.project_id,
-                    title: ev.session.title,
-                  }
-                : s
-            );
-            refreshSessions().catch(() => undefined);
-          } else if (ev.type === 'error') {
-            setError(ev.error);
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId && m.kind === 'assistant'
-                  ? { ...m, content: m.content || ev.error }
-                  : m
-              )
-            );
-          }
-        },
-        controller.signal
-      );
+        baseMessages: viewMessages,
+        session: viewSession,
+      });
+      refreshSessions().catch(() => undefined);
     } catch (err: any) {
       if (err?.name !== 'AbortError') {
         setError(err.message || 'Falló el envío');
       }
     } finally {
-      setBusy(false);
-      requestAnimationFrame(() => inputRef.current?.focus());
+      requestAnimationFrame(() => {
+        if (
+          inputRef.current &&
+          active &&
+          !inputRef.current.closest('.chat-route-hidden')
+        ) {
+          inputRef.current.focus();
+        }
+      });
     }
+  }
+
+  async function onSubmit(e?: FormEvent) {
+    e?.preventDefault();
+    await sendMessage(input);
   }
 
   function onComposerKey(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -487,6 +577,8 @@ export function ChatPage() {
   );
   const needsProject = projects.length > 0 && selectedProjectId === '';
   const noProjects = projects.length === 0 && !loading;
+  const followUps =
+    !viewBusy && !noProjects ? getFollowUps(viewMessages) : [];
 
   return (
     <div className={`chat-page${sessionsOpen ? ' sessions-open' : ''}`}>
@@ -559,7 +651,7 @@ export function ChatPage() {
             >
               Chats
             </button>
-            <h1>{session?.title || 'Agente QA'}</h1>
+            <h1>{viewSession?.title || 'Agente QA'}</h1>
             <p>Decile qué ticket mirar, qué probar o qué evidencias necesitás.</p>
           </div>
 
@@ -568,7 +660,7 @@ export function ChatPage() {
             <select
               id="chat-project"
               value={selectedProjectId === '' ? '' : String(selectedProjectId)}
-              disabled={busy || savingProject || projects.length === 0}
+              disabled={viewBusy || savingProject || projects.length === 0}
               onChange={(e) => onSelectProject(e.target.value)}
             >
               <option value="">Elegí un proyecto…</option>
@@ -618,11 +710,11 @@ export function ChatPage() {
           </div>
         )}
 
-        {error && (
+        {viewError && (
           <div className="chat-banner fail" role="alert">
             <div>
               <strong>Algo falló</strong>
-              <p>{error}</p>
+              <p>{viewError}</p>
             </div>
             <button
               type="button"
@@ -635,7 +727,7 @@ export function ChatPage() {
         )}
 
         <div className="chat-thread">
-          {messages.length === 0 && !busy && (
+          {viewMessages.length === 0 && !viewBusy && (
             <div className="chat-empty">
               <p className="chat-empty-kicker">Empezá por acá</p>
               <h2 className="chat-empty-title">¿Qué querés hacer?</h2>
@@ -659,45 +751,107 @@ export function ChatPage() {
             </div>
           )}
 
-          {messages.map((m) => (
-            <article
-              key={m.id}
-              className={
-                m.kind === 'user' ? 'chat-bubble user' : 'chat-bubble assistant'
-              }
-            >
-              <div className="chat-role">
-                {m.kind === 'user' ? 'Vos' : 'Qatin'}
-              </div>
-              {m.kind === 'assistant' && m.tools && m.tools.length > 0 && (
-                <ol className="chat-tools">
-                  {m.tools.map((t, idx) => (
-                    <li
-                      key={`${t.tool}-${idx}`}
-                      className={t.status === 'running' ? 'running' : 'done'}
-                    >
-                      <span className="chat-tool-mark" aria-hidden>
-                        {t.status === 'running' ? '…' : '✓'}
+          {viewMessages.map((m, mi) => {
+            const prev = viewMessages[mi - 1];
+            const sameAsPrev = prev?.kind === m.kind;
+            const isStreaming =
+              m.kind === 'assistant' &&
+              viewBusy &&
+              mi === viewMessages.length - 1 &&
+              Boolean(m.content);
+            const showFollowUps =
+              m.kind === 'assistant' &&
+              mi === viewMessages.length - 1 &&
+              followUps.length > 0;
+
+            return (
+              <article
+                key={m.id}
+                className={[
+                  'chat-msg',
+                  m.kind === 'user' ? 'chat-msg-user' : 'chat-msg-assistant',
+                  sameAsPrev ? 'chat-msg-continued' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                {m.kind === 'assistant' && (
+                  <div className="chat-msg-avatar" aria-hidden>
+                    <span>Q</span>
+                  </div>
+                )}
+                <div className="chat-msg-stack">
+                  {!sameAsPrev && (
+                    <div className="chat-msg-meta">
+                      <span className="chat-role">
+                        {m.kind === 'user' ? 'Vos' : 'Qatin'}
                       </span>
-                      <span>{t.detail || t.tool}</span>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {m.content ? (
-                <MessageBody text={m.content} />
-              ) : m.kind === 'assistant' && busy ? (
-                <div className="chat-content chat-thinking">
-                  <span className="chat-thinking-dots" aria-hidden>
-                    <i />
-                    <i />
-                    <i />
-                  </span>
-                  Trabajando…
+                    </div>
+                  )}
+                  {m.kind === 'assistant' && m.tools && m.tools.length > 0 && (
+                    <ol className="chat-tools" aria-label="Acciones del agente">
+                      {m.tools.map((t, idx) => (
+                        <li
+                          key={`${t.tool}-${idx}`}
+                          className={
+                            t.status === 'running' ? 'running' : 'done'
+                          }
+                        >
+                          <span className="chat-tool-mark" aria-hidden>
+                            {t.status === 'running' ? (
+                              <span className="chat-tool-spin" />
+                            ) : (
+                              '✓'
+                            )}
+                          </span>
+                          <span className="chat-tool-label">
+                            {t.detail || t.tool}
+                          </span>
+                        </li>
+                      ))}
+                    </ol>
+                  )}
+                  {m.content ? (
+                    <MessageBody text={m.content} streaming={isStreaming} />
+                  ) : m.kind === 'assistant' && viewBusy ? (
+                    <div className="chat-content chat-thinking">
+                      <span className="chat-thinking-dots" aria-hidden>
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      <span>
+                        {m.tools?.find((t) => t.status === 'running')?.detail ||
+                          'Trabajando…'}
+                      </span>
+                    </div>
+                  ) : null}
+                  {showFollowUps && (
+                    <div
+                      className="chat-followups"
+                      aria-label="Sugerencias para continuar"
+                    >
+                      <p className="chat-followups-label">Seguir con</p>
+                      <div className="chat-suggestions">
+                        {followUps.map((f) => (
+                          <button
+                            key={f.id}
+                            type="button"
+                            className="chat-suggestion chat-followup"
+                            onClick={() => sendMessage(f.prompt)}
+                            disabled={viewBusy || noProjects}
+                            title={f.prompt}
+                          >
+                            {f.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-              ) : null}
-            </article>
-          ))}
+              </article>
+            );
+          })}
           <div ref={bottomRef} />
         </div>
 
@@ -715,7 +869,7 @@ export function ChatPage() {
                     : 'Ej: ¿Qué entendés del ticket ABC-12?'
               }
               rows={1}
-              disabled={busy}
+              disabled={viewBusy}
               onKeyDown={onComposerKey}
               aria-label="Mensaje"
             />
@@ -724,7 +878,7 @@ export function ChatPage() {
                 Enter envía · Shift+Enter nueva línea
               </span>
               <div className="chat-composer-actions">
-                {busy ? (
+                {viewBusy ? (
                   <button
                     type="button"
                     className="btn btn-ghost btn-compact"

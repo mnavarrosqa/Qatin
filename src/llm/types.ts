@@ -81,11 +81,37 @@ export const PROVIDER_DEFAULTS: Record<
     label: 'Compatible con OpenAI (Cursor / custom)',
   },
   ollama: {
-    model: 'llama3.2',
+    model: 'hermes3:latest',
     baseUrl: 'http://localhost:11434/v1',
     label: 'Ollama (servidor local o remoto)',
   },
 };
+
+export type PromptTier = 'full' | 'compact';
+
+/**
+ * Classify a provider+model pair into a prompt tier.
+ * "full"    → large-context models that handle detailed instructions well.
+ * "compact" → smaller / local models that need shorter, simpler prompts.
+ */
+export function getPromptTier(provider: LlmProvider, model?: string): PromptTier {
+  if (provider === 'ollama') return 'compact';
+
+  const m = (model || '').toLowerCase();
+
+  // OpenAI-compatible could be anything — assume compact unless it looks like a big model
+  if (provider === 'openai-compatible') {
+    const bigPatterns = [
+      'gpt-4', 'gpt-5', 'claude', 'sonnet', 'opus', 'haiku',
+      'deepseek', 'command-r', 'qwen-72b', 'qwen-plus', 'qwen-max',
+      'llama-3.1-405b', 'llama-3.3-70b', 'mixtral-8x22b',
+    ];
+    return bigPatterns.some((p) => m.includes(p)) ? 'full' : 'compact';
+  }
+
+  // Known cloud providers are always full-tier
+  return 'full';
+}
 
 /** Settings keys for a saved per-provider model/base URL profile. */
 export function providerProfileKeys(provider: LlmProvider): {

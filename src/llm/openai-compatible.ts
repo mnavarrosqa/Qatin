@@ -49,6 +49,8 @@ export class OpenAICompatibleClient implements LlmProviderClient {
   private client: OpenAI;
   private model: string;
   private supportsJsonFormat: boolean;
+  /** Ollama qwen3.x “thinking” stalls tool calls; disable when talking to Ollama. */
+  private disableThinking: boolean;
 
   constructor(opts: {
     apiKey: string;
@@ -58,9 +60,12 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     supportsJsonFormat?: boolean;
     /** Request timeout in ms (OpenAI SDK default is long; tests need a short one) */
     timeoutMs?: number;
+    /** Pass `think: false` for Ollama reasoning models (qwen3, etc.) */
+    disableThinking?: boolean;
   }) {
     this.model = opts.model;
     this.supportsJsonFormat = opts.supportsJsonFormat !== false;
+    this.disableThinking = Boolean(opts.disableThinking);
     this.client = new OpenAI({
       apiKey: opts.apiKey,
       ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
@@ -69,7 +74,12 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     logger.info('OpenAI-compatible LLM client ready', {
       model: opts.model,
       baseUrl: opts.baseUrl || 'default',
+      disableThinking: this.disableThinking,
     });
+  }
+
+  private ollamaExtras(): Record<string, unknown> {
+    return this.disableThinking ? { think: false } : {};
   }
 
   async chatCompletion(
@@ -86,9 +96,16 @@ export class OpenAICompatibleClient implements LlmProviderClient {
       ...(useJsonFormat
         ? { response_format: { type: 'json_object' as const } }
         : {}),
-    });
+      ...this.ollamaExtras(),
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
 
-    const content = response.choices[0]?.message?.content;
+    const message = response.choices[0]?.message as
+      | (OpenAI.Chat.ChatCompletionMessage & { reasoning?: string })
+      | undefined;
+    const content =
+      message?.content?.trim() ||
+      message?.reasoning?.trim() ||
+      '';
     if (!content) {
       throw new Error('Respuesta vacía del proveedor compatible con OpenAI');
     }
@@ -112,9 +129,12 @@ export class OpenAICompatibleClient implements LlmProviderClient {
       messages: toOpenAiMessages(request.messages),
       temperature: request.temperature ?? 0.3,
       ...(tools?.length ? { tools } : {}),
-    });
+      ...this.ollamaExtras(),
+    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
 
-    const message = response.choices[0]?.message;
+    const message = response.choices[0]?.message as
+      | (OpenAI.Chat.ChatCompletionMessage & { reasoning?: string })
+      | undefined;
     if (!message) {
       throw new Error('Respuesta vacía del proveedor compatible con OpenAI');
     }
@@ -128,8 +148,12 @@ export class OpenAICompatibleClient implements LlmProviderClient {
       },
     }));
 
+    const content =
+      message.content?.trim() ||
+      (!toolCalls?.length ? message.reasoning?.trim() || null : null);
+
     return {
-      content: message.content ?? null,
+      content,
       ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
     };
   }
