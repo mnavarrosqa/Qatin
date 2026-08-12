@@ -21,7 +21,8 @@
     "pm2:stop": "pm2 stop ecosystem.config.cjs",
     "pm2:status": "pm2 status",
     "pm2:logs": "pm2 logs",
-    "redeploy": "bash scripts/redeploy.sh"
+    "redeploy": "bash scripts/redeploy.sh",
+    "preflight": "bash scripts/pre-deploy-check.sh"
   },
   "keywords": [
     "jira",

@@ -42,7 +42,7 @@ Model Context Protocol (MCP) es un protocolo estándar que permite a los modelos
 ### 1. Instalar el Servidor MCP
 
 ```bash
-cd /agent/mcp-server-jira
+cd ./mcp-server-jira
 npm install
 npm run build
 ```
@@ -50,7 +50,7 @@ npm run build
 ### 2. Configurar Credenciales
 
 ```bash
-cd /agent/mcp-server-jira
+cd ./mcp-server-jira
 cp .env.example .env
 nano .env
 ```
@@ -65,17 +65,17 @@ JIRA_API_TOKEN=your-jira-api-token
 ### 3. Actualizar Dependencias del Proyecto Principal
 
 ```bash
-cd /agent
+cd /path/to/qatin
 npm install @modelcontextprotocol/sdk
 ```
 
 ### 4. Configurar el Cliente Principal
 
-En `/agent/.env`, añadir:
+En `.env`, añadir:
 ```env
 # MCP Configuration (opcional)
 USE_MCP=true
-MCP_JIRA_SERVER_PATH=/agent/mcp-server-jira/dist/index.js
+MCP_JIRA_SERVER_PATH=./mcp-server-jira/dist/index.js
 ```
 
 ## Uso
@@ -212,7 +212,7 @@ Obtener transiciones disponibles:
 
 ```bash
 # Terminal 1: Iniciar servidor MCP
-cd /agent/mcp-server-jira
+cd ./mcp-server-jira
 node dist/index.js
 
 # Terminal 2: Probar con stdio
@@ -222,7 +222,7 @@ echo '{"jsonrpc": "2.0", "method": "tools/list", "id": 1}' | node dist/index.js
 ### Test con Cliente
 
 ```bash
-cd /agent
+cd /path/to/qatin
 npm run dev
 
 # En otra terminal
@@ -252,13 +252,13 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/agent/mcp-server-jira
+WorkingDirectory=./mcp-server-jira
 Environment=NODE_ENV=production
-ExecStart=/usr/bin/node /agent/mcp-server-jira/dist/index.js
+ExecStart=/usr/bin/node ./mcp-server-jira/dist/index.js
 Restart=always
 RestartSec=10
-StandardOutput=append:/agent/logs/mcp-server.log
-StandardError=append:/agent/logs/mcp-server-error.log
+StandardOutput=append:./logs/mcp-server.log
+StandardError=append:./logs/mcp-server-error.log
 
 [Install]
 WantedBy=multi-user.target
@@ -285,7 +285,7 @@ services:
       - ./mcp-server-jira/.env
     restart: unless-stopped
     volumes:
-      - ./logs:/agent/logs
+      - ./logs:./logs
 ```
 
 ## Configuración en Cursor
@@ -300,7 +300,7 @@ Para usar el servidor MCP en Cursor IDE:
 {
   "jira-qa": {
     "command": "node",
-    "args": ["/agent/mcp-server-jira/dist/index.js"],
+    "args": ["./mcp-server-jira/dist/index.js"],
     "env": {
       "JIRA_URL": "https://your-company.atlassian.net",
       "JIRA_EMAIL": "your-email@company.com",
@@ -316,31 +316,31 @@ Para usar el servidor MCP en Cursor IDE:
 
 ```bash
 # Verificar que está compilado
-ls -la /agent/mcp-server-jira/dist/
+ls -la ./mcp-server-jira/dist/
 
 # Re-compilar
-cd /agent/mcp-server-jira
+cd ./mcp-server-jira
 npm run build
 
 # Verificar permisos
-chmod +x /agent/mcp-server-jira/dist/index.js
+chmod +x ./mcp-server-jira/dist/index.js
 ```
 
 ### Cliente no detecta MCP
 
 ```bash
 # Verificar variable de entorno
-grep MCP /agent/.env
+grep MCP .env
 
 # Verificar logs
-tail -f /agent/logs/server.log | grep -i mcp
+tail -f ./logs/server.log | grep -i mcp
 ```
 
 ### Errores de autenticación
 
 ```bash
 # Verificar credenciales del servidor MCP
-cat /agent/mcp-server-jira/.env
+cat ./mcp-server-jira/.env
 
 # Probar credenciales manualmente
 curl -u "email@example.com:api-token" \

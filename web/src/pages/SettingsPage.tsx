@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import {
   api,
   type ProviderInfo,
@@ -8,6 +8,7 @@ import {
 } from '../api';
 
 type SettingsTab = 'model' | 'keys' | 'jira' | 'agents' | 'plugins';
+type PluginBusyAction = 'install' | 'uninstall' | 'config';
 
 const TABS: { id: SettingsTab; label: string }[] = [
   { id: 'model', label: 'Modelo' },
@@ -33,6 +34,37 @@ function apiKeyFieldForProvider(provider: string): string | null {
   }
 }
 
+function pluginBadge(
+  plugin: PluginInfo,
+  busy: { id: PluginId; action: PluginBusyAction } | null
+): { className: string; label: string } {
+  if (busy?.id === plugin.id) {
+    if (busy.action === 'install') {
+      return { className: 'badge busy', label: 'instalando…' };
+    }
+    if (busy.action === 'uninstall') {
+      return { className: 'badge busy', label: 'desinstalando…' };
+    }
+    return { className: 'badge busy', label: 'guardando…' };
+  }
+  if (plugin.installed) {
+    return { className: 'badge ok', label: 'activo' };
+  }
+  return { className: 'badge warn', label: 'inactivo' };
+}
+
+function pluginActionLabel(
+  plugin: PluginInfo,
+  busy: { id: PluginId; action: PluginBusyAction } | null
+): string {
+  if (busy?.id === plugin.id) {
+    if (busy.action === 'install') return 'Instalando…';
+    if (busy.action === 'uninstall') return 'Desinstalando…';
+    return 'Guardando…';
+  }
+  return plugin.installed ? 'Desactivar' : 'Activar';
+}
+
 export function SettingsPage() {
   const [tab, setTab] = useState<SettingsTab>('model');
   const [settings, setSettings] = useState<Record<string, string>>({});
@@ -41,7 +73,16 @@ export function SettingsPage() {
   const [error, setError] = useState('');
   const [pluginError, setPluginError] = useState('');
   const [saved, setSaved] = useState(false);
-  const [busyId, setBusyId] = useState<PluginId | null>(null);
+  const [pluginBusy, setPluginBusy] = useState<{
+    id: PluginId;
+    action: PluginBusyAction;
+  } | null>(null);
+  const [pluginFlash, setPluginFlash] = useState<{
+    id: PluginId;
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const pluginFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -67,6 +108,21 @@ export function SettingsPage() {
       })
       .catch((e) => setError(e.message));
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pluginFlashTimer.current) clearTimeout(pluginFlashTimer.current);
+    };
+  }, []);
+
+  function flashPlugin(id: PluginId, ok: boolean, text: string) {
+    if (pluginFlashTimer.current) clearTimeout(pluginFlashTimer.current);
+    setPluginFlash({ id, ok, text });
+    pluginFlashTimer.current = setTimeout(() => {
+      setPluginFlash((prev) => (prev?.id === id ? null : prev));
+      pluginFlashTimer.current = null;
+    }, 3500);
+  }
 
   function set(key: string, value: string) {
     setSettings((prev) => ({ ...prev, [key]: value }));
@@ -197,34 +253,52 @@ export function SettingsPage() {
   }
 
   async function toggleInstall(plugin: PluginInfo) {
+    const nextInstalled = !plugin.installed;
     setPluginError('');
-    setBusyId(plugin.id);
+    setPluginFlash(null);
+    setPluginBusy({
+      id: plugin.id,
+      action: nextInstalled ? 'install' : 'uninstall',
+    });
     try {
       const res = await api.updatePlugin(plugin.id, {
-        installed: !plugin.installed,
+        installed: nextInstalled,
         maxRetries: plugin.maxRetries,
       });
       setPlugins(res.plugins);
+      flashPlugin(
+        plugin.id,
+        true,
+        nextInstalled
+          ? 'Activado. Se usa en la próxima ejecución.'
+          : 'Desactivado. Ya no se usa en nuevas ejecuciones.'
+      );
     } catch (e: any) {
-      setPluginError(e.message);
+      const msg = e.message || 'No se pudo actualizar el plugin';
+      setPluginError(msg);
+      flashPlugin(plugin.id, false, msg);
     } finally {
-      setBusyId(null);
+      setPluginBusy(null);
     }
   }
 
   async function setFlakyRetries(plugin: PluginInfo, maxRetries: number) {
     setPluginError('');
-    setBusyId(plugin.id);
+    setPluginFlash(null);
+    setPluginBusy({ id: plugin.id, action: 'config' });
     try {
       const res = await api.updatePlugin(plugin.id, {
         installed: plugin.installed,
         maxRetries,
       });
       setPlugins(res.plugins);
+      flashPlugin(plugin.id, true, `Reintentos extra: ${maxRetries}`);
     } catch (e: any) {
-      setPluginError(e.message);
+      const msg = e.message || 'No se pudo guardar la configuración';
+      setPluginError(msg);
+      flashPlugin(plugin.id, false, msg);
     } finally {
-      setBusyId(null);
+      setPluginBusy(null);
     }
   }
 
@@ -258,6 +332,8 @@ export function SettingsPage() {
               setSaved(false);
               setMcpError('');
               setError('');
+              setPluginError('');
+              setPluginFlash(null);
               setTestMsg(null);
             }}
           >
@@ -609,60 +685,87 @@ export function SettingsPage() {
           >
             <p className="panel-lead">
               Plugins de runtime: memoria entre runs, recuperación de
-              selectores, reintentos flaky y falla ante errores de red.
+              selectores, reintentos flaky y falla ante errores de red. Activo
+              = se aplica en la próxima ejecución; inactivo = no se usa.
             </p>
             {pluginError && <p className="error">{pluginError}</p>}
             {plugins.length === 0 && !pluginError ? (
               <p className="empty">Cargando plugins…</p>
             ) : (
               <div className="list">
-                {plugins.map((plugin) => (
-                  <div className="list-item" key={plugin.id}>
-                    <div>
-                      <h3>{plugin.name}</h3>
-                      <p>{plugin.description}</p>
-                      {plugin.id === 'flaky-retry' && plugin.installed && (
-                        <div className="field plugin-config">
-                          <label htmlFor={`retries-${plugin.id}`}>
-                            Reintentos extra
-                          </label>
-                          <select
-                            id={`retries-${plugin.id}`}
-                            value={plugin.maxRetries ?? 2}
-                            disabled={busyId === plugin.id}
-                            onChange={(e) =>
-                              setFlakyRetries(
-                                plugin,
-                                Number(e.target.value)
-                              )
+                {plugins.map((plugin) => {
+                  const badge = pluginBadge(plugin, pluginBusy);
+                  const busy = pluginBusy?.id === plugin.id;
+                  const flash =
+                    pluginFlash?.id === plugin.id ? pluginFlash : null;
+                  return (
+                    <div
+                      className={`list-item${busy ? ' is-busy' : ''}`}
+                      key={plugin.id}
+                    >
+                      <div>
+                        <h3>{plugin.name}</h3>
+                        <p>{plugin.description}</p>
+                        {plugin.id === 'flaky-retry' && plugin.installed && (
+                          <div className="field plugin-config">
+                            <label htmlFor={`retries-${plugin.id}`}>
+                              Reintentos extra
+                            </label>
+                            <select
+                              id={`retries-${plugin.id}`}
+                              value={plugin.maxRetries ?? 2}
+                              disabled={busy}
+                              onChange={(e) =>
+                                setFlakyRetries(
+                                  plugin,
+                                  Number(e.target.value)
+                                )
+                              }
+                            >
+                              <option value={1}>1</option>
+                              <option value={2}>2</option>
+                              <option value={3}>3</option>
+                              <option value={4}>4</option>
+                              <option value={5}>5</option>
+                            </select>
+                          </div>
+                        )}
+                        {flash && (
+                          <p
+                            className={
+                              flash.ok
+                                ? 'plugin-feedback ok'
+                                : 'plugin-feedback fail'
                             }
+                            role="status"
+                            aria-live="polite"
                           >
-                            <option value={1}>1</option>
-                            <option value={2}>2</option>
-                            <option value={3}>3</option>
-                            <option value={4}>4</option>
-                            <option value={5}>5</option>
-                          </select>
-                        </div>
-                      )}
+                            {flash.text}
+                          </p>
+                        )}
+                      </div>
+                      <div className="actions">
+                        <span className={badge.className} aria-live="polite">
+                          {busy && <span className="badge-spinner" aria-hidden />}
+                          {badge.label}
+                        </span>
+                        <button
+                          className={
+                            plugin.installed && !busy
+                              ? 'btn btn-ghost btn-compact'
+                              : 'btn btn-compact'
+                          }
+                          type="button"
+                          disabled={busy}
+                          aria-busy={busy}
+                          onClick={() => void toggleInstall(plugin)}
+                        >
+                          {pluginActionLabel(plugin, pluginBusy)}
+                        </button>
+                      </div>
                     </div>
-                    <div className="actions">
-                      <span
-                        className={`badge ${plugin.installed ? 'ok' : 'warn'}`}
-                      >
-                        {plugin.installed ? 'instalado' : 'disponible'}
-                      </span>
-                      <button
-                        className={plugin.installed ? 'btn btn-ghost' : 'btn'}
-                        type="button"
-                        disabled={busyId === plugin.id}
-                        onClick={() => toggleInstall(plugin)}
-                      >
-                        {plugin.installed ? 'Desinstalar' : 'Instalar'}
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>

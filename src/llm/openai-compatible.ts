@@ -6,8 +6,25 @@ import {
   AgentMessage,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  LlmUsage,
   ToolCall,
 } from './types';
+
+function usageFromOpenAi(
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  } | null
+): LlmUsage | undefined {
+  if (!usage) return undefined;
+  const promptTokens = usage.prompt_tokens || 0;
+  const completionTokens = usage.completion_tokens || 0;
+  const totalTokens =
+    usage.total_tokens || promptTokens + completionTokens;
+  if (totalTokens <= 0) return undefined;
+  return { promptTokens, completionTokens, totalTokens };
+}
 import { logger } from '../utils/logger';
 
 function toOpenAiMessages(
@@ -124,13 +141,16 @@ export class OpenAICompatibleClient implements LlmProviderClient {
         },
       })) || undefined;
 
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: toOpenAiMessages(request.messages),
-      temperature: request.temperature ?? 0.3,
-      ...(tools?.length ? { tools } : {}),
-      ...this.ollamaExtras(),
-    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
+    const response = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages: toOpenAiMessages(request.messages),
+        temperature: request.temperature ?? 0.3,
+        ...(tools?.length ? { tools } : {}),
+        ...this.ollamaExtras(),
+      } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
+      request.signal ? { signal: request.signal } : undefined
+    );
 
     const message = response.choices[0]?.message as
       | (OpenAI.Chat.ChatCompletionMessage & { reasoning?: string })
@@ -152,9 +172,11 @@ export class OpenAICompatibleClient implements LlmProviderClient {
       message.content?.trim() ||
       (!toolCalls?.length ? message.reasoning?.trim() || null : null);
 
+    const usage = usageFromOpenAi(response.usage);
     return {
       content,
       ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+      ...(usage ? { usage } : {}),
     };
   }
 }

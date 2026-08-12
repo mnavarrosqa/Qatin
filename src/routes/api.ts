@@ -846,7 +846,20 @@ router.delete('/test-cases/:caseId', (req, res) => {
 
 router.get('/chat/sessions', (req, res) => {
   const limit = parseInt(req.query.limit as string) || 50;
-  res.json({ sessions: listChatSessions(limit) });
+  const raw = req.query.project_id;
+  let projectId: number | null | undefined;
+  if (raw === undefined) {
+    projectId = undefined;
+  } else if (raw === '' || raw === 'null') {
+    projectId = null;
+  } else {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+      return res.status(400).json({ error: 'project_id inválido' });
+    }
+    projectId = n;
+  }
+  res.json({ sessions: listChatSessions(limit, projectId) });
 });
 
 router.post('/chat/sessions', (req, res) => {
@@ -975,15 +988,24 @@ router.post('/chat/sessions/:id/messages', async (req, res) => {
   };
 
   let closed = false;
-  req.on('close', () => {
+  const turnAbort = new AbortController();
+  // Use the response, not the request: req 'close' fires when the POST body
+  // finishes reading, which would drop every SSE event after that.
+  // Abort the agent only on premature disconnect (client stop / network drop).
+  const markClosed = () => {
     closed = true;
+  };
+  res.on('close', () => {
+    markClosed();
+    if (!res.writableEnded) turnAbort.abort();
   });
+  res.on('finish', markClosed);
 
   // Keep proxies/browsers from buffering the stream during long LLM waits
   res.write(': connected\n\n');
   flush();
   const heartbeat = setInterval(() => {
-    if (closed) return;
+    if (closed || res.writableEnded) return;
     res.write(`: ping ${Date.now()}\n\n`);
     flush();
   }, 2000);
@@ -992,8 +1014,9 @@ router.post('/chat/sessions/:id/messages', async (req, res) => {
     await runQaChatTurn({
       sessionId: id,
       userMessage: body.content,
+      signal: turnAbort.signal,
       onEvent: (ev) => {
-        if (closed) return;
+        if (closed || res.writableEnded) return;
         if (ev.type === 'token') send('token', { text: ev.text });
         else if (ev.type === 'tool_start')
           send('tool_start', {
@@ -1018,13 +1041,17 @@ router.post('/chat/sessions/:id/messages', async (req, res) => {
       },
     });
   } catch (error: any) {
-    logger.error('Chat SSE failed:', error);
-    if (!closed) {
-      send('error', { error: error?.message || 'Error del agente' });
+    if (error?.name === 'AbortError' || turnAbort.signal.aborted) {
+      logger.info('Chat SSE aborted by client', { sessionId: id });
+    } else {
+      logger.error('Chat SSE failed:', error);
+      if (!closed && !res.writableEnded) {
+        send('error', { error: error?.message || 'Error del agente' });
+      }
     }
   } finally {
     clearInterval(heartbeat);
-    if (!closed) res.end();
+    if (!res.writableEnded) res.end();
   }
 });
 

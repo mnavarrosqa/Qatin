@@ -6,8 +6,21 @@ import {
   AgentMessage,
   ChatCompletionRequest,
   ChatCompletionResponse,
+  LlmUsage,
   ToolCall,
 } from './types';
+
+function usageFromClaude(usage?: {
+  input_tokens?: number;
+  output_tokens?: number;
+}): LlmUsage | undefined {
+  if (!usage) return undefined;
+  const promptTokens = usage.input_tokens || 0;
+  const completionTokens = usage.output_tokens || 0;
+  const totalTokens = promptTokens + completionTokens;
+  if (totalTokens <= 0) return undefined;
+  return { promptTokens, completionTokens, totalTokens };
+}
 import { logger } from '../utils/logger';
 
 function splitSystem(messages: AgentMessage[]): {
@@ -130,14 +143,17 @@ export class ClaudeClient implements LlmProviderClient {
       input_schema: tool.parameters as Anthropic.Tool.InputSchema,
     }));
 
-    const response = await this.client.messages.create({
-      model: this.model,
-      max_tokens: 4096,
-      temperature: request.temperature ?? 0.3,
-      ...(system ? { system } : {}),
-      messages: toClaudeMessages(rest),
-      ...(tools?.length ? { tools } : {}),
-    });
+    const response = await this.client.messages.create(
+      {
+        model: this.model,
+        max_tokens: 4096,
+        temperature: request.temperature ?? 0.3,
+        ...(system ? { system } : {}),
+        messages: toClaudeMessages(rest),
+        ...(tools?.length ? { tools } : {}),
+      },
+      request.signal ? { signal: request.signal } : undefined
+    );
 
     const textParts: string[] = [];
     const toolCalls: ToolCall[] = [];
@@ -158,9 +174,11 @@ export class ClaudeClient implements LlmProviderClient {
       }
     }
 
+    const usage = usageFromClaude(response.usage);
     return {
       content: textParts.length ? textParts.join('\n') : null,
       ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+      ...(usage ? { usage } : {}),
     };
   }
 }

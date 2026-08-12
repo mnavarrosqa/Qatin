@@ -7,7 +7,7 @@ Sistema de agentes QA automatizado que integra Jira + Playwright + IA para testi
 ### Estructura del Proyecto
 
 ```
-/agent/
+qatin/
 ├── src/                           # Código fuente TypeScript
 │   ├── server.ts                  # API Server (Express)
 │   ├── worker.ts                  # Worker process

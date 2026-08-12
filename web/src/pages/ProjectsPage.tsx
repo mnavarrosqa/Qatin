@@ -143,6 +143,9 @@ export function ProjectsPage() {
   }
 
   const selectedProvider = form.llm_provider;
+  const selectedMeta = selectedProvider
+    ? providers.find((p) => p.id === selectedProvider)
+    : undefined;
 
   return (
     <>
@@ -251,31 +254,12 @@ export function ProjectsPage() {
                 value={form.llm_provider || ''}
                 onChange={(e) => {
                   const value = (e.target.value || null) as LlmProvider | null;
-                  const meta = providers.find((p) => p.id === value);
                   setTestMsg(null);
-                  if (!value) {
-                    setForm({
-                      ...form,
-                      llm_provider: null,
-                      llm_model: '',
-                      llm_base_url: '',
-                    });
-                    return;
-                  }
-                  // Prefer the saved Settings profile for this provider when it exists
-                  const model =
-                    (meta?.configured && meta.configuredModel) ||
-                    meta?.defaultModel ||
-                    '';
-                  const baseUrl =
-                    (meta?.configured && meta.configuredBaseUrl) ||
-                    meta?.defaultBaseUrl ||
-                    '';
                   setForm({
                     ...form,
                     llm_provider: value,
-                    llm_model: model,
-                    llm_base_url: baseUrl,
+                    llm_model: '',
+                    llm_base_url: '',
                   });
                 }}
               >
@@ -287,13 +271,11 @@ export function ProjectsPage() {
                   </option>
                 ))}
               </select>
-              {selectedProvider &&
-                providers.find((p) => p.id === selectedProvider)?.configured && (
-                  <p className="hint">
-                    Este proveedor ya está configurado en Settings; se usan esas
-                    credenciales y su modelo/URL guardados.
-                  </p>
-                )}
+              <p className="hint">
+                {selectedProvider
+                  ? 'Dejá modelo y URL vacíos para usar los de Configuración. Completalos solo si este proyecto usa otro modelo.'
+                  : 'Sin override: el chat usa el proveedor y modelo de Configuración.'}
+              </p>
             </div>
             <div className="field">
               <label htmlFor="llm_model">Modelo</label>
@@ -302,7 +284,9 @@ export function ProjectsPage() {
                 value={form.llm_model || ''}
                 onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
                 placeholder={
-                  selectedProvider === 'ollama' ? 'llama3.2' : 'gpt-4-turbo-preview'
+                  selectedMeta?.configuredModel ||
+                  selectedMeta?.defaultModel ||
+                  'Modelo por defecto de Configuración'
                 }
               />
             </div>
@@ -324,11 +308,13 @@ export function ProjectsPage() {
                   setForm({ ...form, llm_base_url: e.target.value })
                 }
                 placeholder={
-                  selectedProvider === 'deepseek'
+                  selectedMeta?.configuredBaseUrl ||
+                  selectedMeta?.defaultBaseUrl ||
+                  (selectedProvider === 'deepseek'
                     ? 'https://api.deepseek.com'
                     : selectedProvider === 'ollama'
                       ? 'http://tu-host-ollama:11434/v1'
-                      : 'https://tu-endpoint-compatible/v1'
+                      : 'https://tu-endpoint-compatible/v1')
                 }
               />
             </div>
@@ -381,18 +367,18 @@ export function ProjectsPage() {
                   </p>
                 </div>
                 <div className="actions">
-                  <Link className="btn btn-ghost" to="/">
+                  <Link className="btn btn-ghost btn-compact" to="/">
                     Chat
                   </Link>
                   <button
-                    className="btn btn-ghost"
+                    className="btn btn-ghost btn-compact"
                     type="button"
                     onClick={() => startEdit(project)}
                   >
                     Editar
                   </button>
                   <button
-                    className="btn btn-danger"
+                    className="btn btn-danger btn-compact"
                     type="button"
                     onClick={() => remove(project.id)}
                   >

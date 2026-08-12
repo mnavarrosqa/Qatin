@@ -12,6 +12,7 @@ import {
   getJiraCredentials,
   jiraAuthHeader,
 } from '../jira/credentials';
+import { APP_ROOT } from '../paths';
 
 type McpClient = {
   callTool(params: { name: string; arguments?: Record<string, unknown> }): Promise<unknown>;
@@ -35,7 +36,7 @@ export function resolveMcpServerPath(): string {
   if (process.env.MCP_JIRA_SERVER_PATH) {
     return path.resolve(process.env.MCP_JIRA_SERVER_PATH);
   }
-  return path.resolve(process.cwd(), 'mcp-server-jira/dist/index.js');
+  return path.resolve(APP_ROOT, 'mcp-server-jira/dist/index.js');
 }
 
 function mcpChildEnv(): Record<string, string> {

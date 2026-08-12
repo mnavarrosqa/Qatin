@@ -19,7 +19,7 @@ Esta guía te ayudará a configurar el servidor MCP de Jira en 5 minutos.
 ### Paso 1: Instalar
 
 ```bash
-cd /agent
+cd /path/to/qatin
 ./scripts/setup-mcp.sh
 ```
 
@@ -49,7 +49,7 @@ JIRA_API_TOKEN=your-jira-api-token
 Ya está configurado automáticamente en `.env`:
 ```env
 USE_MCP=true
-MCP_JIRA_SERVER_PATH=/agent/mcp-server-jira/dist/index.js
+MCP_JIRA_SERVER_PATH=./mcp-server-jira/dist/index.js
 ```
 
 ## Verificar Funcionamiento
@@ -111,11 +111,11 @@ After=network.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/agent/mcp-server-jira
-ExecStart=/usr/bin/node /agent/mcp-server-jira/dist/index.js
+WorkingDirectory=./mcp-server-jira
+ExecStart=/usr/bin/node ./mcp-server-jira/dist/index.js
 Restart=always
-StandardOutput=append:/agent/logs/mcp-server.log
-StandardError=append:/agent/logs/mcp-server-error.log
+StandardOutput=append:./logs/mcp-server.log
+StandardError=append:./logs/mcp-server-error.log
 
 [Install]
 WantedBy=multi-user.target

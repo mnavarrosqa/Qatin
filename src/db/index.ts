@@ -8,8 +8,9 @@ import {
   PROVIDER_DEFAULTS,
   providerProfileKeys,
 } from '../llm/types';
+import { getDbPath } from '../paths';
 
-const DB_PATH = process.env.SQLITE_PATH || path.join(process.cwd(), 'data', 'qatin.db');
+const DB_PATH = getDbPath();
 
 let db: Database.Database | null = null;
 
@@ -146,6 +147,9 @@ function migrate(database: Database.Database): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
     );
+
+    CREATE INDEX IF NOT EXISTS idx_chat_sessions_project
+      ON chat_sessions(project_id, updated_at DESC);
 
     CREATE TABLE IF NOT EXISTS chat_messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -835,12 +839,32 @@ function toChatMessagePublic(row: ChatMessageRow): ChatMessagePublic {
   return { ...rest, meta };
 }
 
-export function listChatSessions(limit = 50): ChatSessionRow[] {
-  return getDb()
+export function listChatSessions(
+  limit = 50,
+  projectId?: number | null
+): ChatSessionRow[] {
+  const db = getDb();
+  if (projectId === undefined) {
+    return db
+      .prepare(
+        `SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?`
+      )
+      .all(limit) as ChatSessionRow[];
+  }
+  if (projectId === null) {
+    return db
+      .prepare(
+        `SELECT * FROM chat_sessions WHERE project_id IS NULL
+         ORDER BY updated_at DESC LIMIT ?`
+      )
+      .all(limit) as ChatSessionRow[];
+  }
+  return db
     .prepare(
-      `SELECT * FROM chat_sessions ORDER BY updated_at DESC LIMIT ?`
+      `SELECT * FROM chat_sessions WHERE project_id = ?
+       ORDER BY updated_at DESC LIMIT ?`
     )
-    .all(limit) as ChatSessionRow[];
+    .all(projectId, limit) as ChatSessionRow[];
 }
 
 export function getChatSession(id: number): ChatSessionRow | null {

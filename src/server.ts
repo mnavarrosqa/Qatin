@@ -8,8 +8,16 @@ import { logger } from './utils/logger';
 import { z } from 'zod';
 import { getDb, createTestRun, updateTestRun } from './db';
 import apiRouter from './routes/api';
+import {
+  APP_ROOT,
+  DATA_DIR,
+  ENV_PATH,
+  ensureAppDirs,
+  getScreenshotsDir,
+} from './paths';
 
-dotenv.config();
+dotenv.config({ path: ENV_PATH });
+ensureAppDirs();
 getDb();
 
 const app = express();
@@ -202,10 +210,8 @@ app.post('/api/webhook/jira', async (req, res) => {
   }
 });
 
-const publicDir = path.join(process.cwd(), 'public');
-const screenshotsDir = path.resolve(
-  process.env.SCREENSHOTS_DIR || './screenshots'
-);
+const publicDir = path.join(APP_ROOT, 'public');
+const screenshotsDir = getScreenshotsDir();
 fs.mkdirSync(screenshotsDir, { recursive: true });
 app.use('/screenshots', express.static(screenshotsDir));
 app.use(express.static(publicDir));
@@ -222,7 +228,7 @@ app.listen(PORT, () => {
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Jira URL: ${process.env.JIRA_URL || '(not set)'}`);
 
-  const setupMarker = path.join(process.cwd(), 'data', '.setup-complete');
+  const setupMarker = path.join(DATA_DIR, '.setup-complete');
   if (!fs.existsSync(setupMarker)) {
     logger.warn(
       'Setup inicial pendiente. Corré `npm run setup` para Playwright, MCP y plugins.'

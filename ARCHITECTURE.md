@@ -84,7 +84,7 @@ El sistema está diseñado con una arquitectura de microservicios orientada a ev
                          ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                      FILE SYSTEM                             │
-│  /agent/                                                     │
+│  <install-root>/                                                     │
 │  ├── screenshots/                                            │
 │  │   ├── PROJ-123/                                          │
 │  │   │   ├── scenario-1-step-1.png                          │

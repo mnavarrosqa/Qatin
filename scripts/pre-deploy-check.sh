@@ -1,227 +1,182 @@
 #!/bin/bash
+# Pre-install / pre-deploy checklist for Qatin
+# Run from the repo root: ./scripts/pre-deploy-check.sh
 
-# Pre-deployment checklist script
-# Verifies all requirements before deploying
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo "🔍 Pre-Deployment Checklist for Jira QA Agent"
-echo ""
-
 ERRORS=0
 WARNINGS=0
 
-# Check 1: .env file exists
-echo -n "1. Checking .env file... "
-if [ -f ".env" ]; then
-    echo -e "${GREEN}✓${NC}"
-    
-    # Check required vars
-    source .env
-    
-    echo -n "   - JIRA_URL... "
-    if [ -z "$JIRA_URL" ]; then
-        echo -e "${RED}✗ Missing${NC}"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${GREEN}✓${NC}"
-    fi
-    
-    echo -n "   - JIRA_EMAIL... "
-    if [ -z "$JIRA_EMAIL" ]; then
-        echo -e "${RED}✗ Missing${NC}"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${GREEN}✓${NC}"
-    fi
-    
-    echo -n "   - JIRA_API_TOKEN... "
-    if [ -z "$JIRA_API_TOKEN" ]; then
-        echo -e "${RED}✗ Missing${NC}"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${GREEN}✓${NC}"
-    fi
-    
-    echo -n "   - OPENAI_API_KEY... "
-    if [ -z "$OPENAI_API_KEY" ]; then
-        echo -e "${RED}✗ Missing${NC}"
-        ERRORS=$((ERRORS + 1))
-    else
-        echo -e "${GREEN}✓${NC}"
-    fi
-    
-    echo -n "   - APP_BASE_URL... "
-    if [ -z "$APP_BASE_URL" ]; then
-        echo -e "${YELLOW}⚠ Missing (not critical)${NC}"
-        WARNINGS=$((WARNINGS + 1))
-    else
-        echo -e "${GREEN}✓${NC}"
-    fi
+ok() { echo -e "${GREEN}✓${NC} $1"; }
+warn() { echo -e "${YELLOW}⚠${NC} $1"; WARNINGS=$((WARNINGS + 1)); }
+fail() { echo -e "${RED}✗${NC} $1"; ERRORS=$((ERRORS + 1)); }
+
+echo "Qatin pre-deploy checklist"
+echo "Root: $ROOT"
+echo ""
+
+# 1. .env
+if [ -f .env ]; then
+  ok ".env present"
+  # shellcheck disable=SC1091
+  set -a
+  # Prefer safe parse: only KEY=VALUE lines without executing shell
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|\#*) continue ;;
+      *=*)
+        key="${line%%=*}"
+        val="${line#*=}"
+        export "$key=$val" 2>/dev/null || true
+        ;;
+    esac
+  done < .env
+  set +a
+
+  if [ -n "${CREDENTIALS_SECRET:-}" ]; then
+    ok "CREDENTIALS_SECRET set"
+  else
+    warn "CREDENTIALS_SECRET empty (deploy.sh can generate one)"
+  fi
+
+  if [ -n "${OPENAI_API_KEY:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${DEEPSEEK_API_KEY:-}" ] || [ -n "${LLM_API_KEY:-}" ] || [ "${LLM_PROVIDER:-}" = "ollama" ]; then
+    ok "At least one LLM credential / ollama provider"
+  else
+    warn "No LLM API key in .env (you can set keys later in the UI)"
+  fi
+
+  if [ -z "${JIRA_URL:-}" ] || [ -z "${JIRA_API_TOKEN:-}" ]; then
+    warn "Jira env incomplete (optional if you only paste tickets / configure in UI)"
+  else
+    ok "Jira env present"
+  fi
 else
-    echo -e "${RED}✗ Not found${NC}"
-    echo -e "${YELLOW}   → Run: cp .env.example .env${NC}"
-    ERRORS=$((ERRORS + 1))
+  fail ".env missing — run: cp .env.example .env"
 fi
 
 echo ""
 
-# Check 2: Node.js
-echo -n "2. Checking Node.js... "
-if command -v node &> /dev/null; then
-    VERSION=$(node --version)
-    echo -e "${GREEN}✓ $VERSION${NC}"
-    
-    # Check version >= 18
-    MAJOR=$(echo $VERSION | cut -d'v' -f2 | cut -d'.' -f1)
-    if [ "$MAJOR" -lt 18 ]; then
-        echo -e "${YELLOW}   ⚠ Node.js 18+ recommended${NC}"
-        WARNINGS=$((WARNINGS + 1))
-    fi
+# 2. Node
+if command -v node >/dev/null 2>&1; then
+  VER="$(node -v)"
+  MAJOR="$(echo "$VER" | sed 's/v//' | cut -d. -f1)"
+  if [ "$MAJOR" -ge 20 ]; then
+    ok "Node $VER"
+  else
+    warn "Node $VER (20+ recommended)"
+  fi
 else
-    echo -e "${RED}✗ Not installed${NC}"
-    ERRORS=$((ERRORS + 1))
+  fail "Node.js not installed"
 fi
 
-# Check 3: npm
-echo -n "3. Checking npm... "
-if command -v npm &> /dev/null; then
-    VERSION=$(npm --version)
-    echo -e "${GREEN}✓ v$VERSION${NC}"
+if command -v npm >/dev/null 2>&1; then
+  ok "npm $(npm -v)"
 else
-    echo -e "${RED}✗ Not installed${NC}"
-    ERRORS=$((ERRORS + 1))
+  fail "npm not installed"
 fi
 
 echo ""
 
-# Check 4: Redis
-echo -n "4. Checking Redis... "
-if command -v redis-server &> /dev/null; then
-    VERSION=$(redis-server --version | awk '{print $3}')
-    echo -e "${GREEN}✓ $VERSION${NC}"
-    
-    echo -n "   - Redis running... "
-    if pgrep redis-server > /dev/null; then
-        echo -e "${GREEN}✓${NC}"
-    else
-        echo -e "${YELLOW}⚠ Not running${NC}"
-        WARNINGS=$((WARNINGS + 1))
-    fi
+# 3. Redis
+if redis-cli ping 2>/dev/null | grep -q PONG; then
+  ok "Redis responds PONG"
+elif command -v redis-server >/dev/null 2>&1; then
+  warn "Redis installed but not responding (start redis-server)"
 else
-    echo -e "${RED}✗ Not installed${NC}"
-    ERRORS=$((ERRORS + 1))
+  fail "Redis not installed"
 fi
 
 echo ""
 
-# Check 5: Dependencies installed
-echo -n "5. Checking node_modules... "
-if [ -d "node_modules" ]; then
-    echo -e "${GREEN}✓ Installed${NC}"
+# 4. Build artifacts
+if [ -d node_modules ]; then
+  ok "node_modules present"
 else
-    echo -e "${YELLOW}⚠ Not installed${NC}"
-    echo -e "${YELLOW}   → Run: npm install${NC}"
-    WARNINGS=$((WARNINGS + 1))
+  warn "node_modules missing — npm install / npm run setup"
 fi
 
-# Check 6: TypeScript compiled
-echo -n "6. Checking compiled code... "
-if [ -d "dist" ]; then
-    echo -e "${GREEN}✓ Built${NC}"
+if [ -f dist/server.js ] && [ -f dist/worker.js ]; then
+  ok "Server build (dist/) present"
 else
-    echo -e "${YELLOW}⚠ Not built${NC}"
-    echo -e "${YELLOW}   → Run: npm run build${NC}"
-    WARNINGS=$((WARNINGS + 1))
+  warn "dist/ incomplete — npm run build"
+fi
+
+if [ -f public/index.html ]; then
+  ok "UI build (public/) present"
+else
+  warn "public/ missing — npm run build:web"
 fi
 
 echo ""
 
-# Check 7: Playwright
-echo -n "7. Checking Playwright... "
-if [ -d "node_modules/playwright" ]; then
-    echo -e "${GREEN}✓ Installed${NC}"
-    
-    echo -n "   - Chromium browser... "
-    if [ -d "$HOME/.cache/ms-playwright" ]; then
-        echo -e "${GREEN}✓${NC}"
-    else
-        echo -e "${YELLOW}⚠ Not installed${NC}"
-        echo -e "${YELLOW}   → Run: npx playwright install chromium${NC}"
-        WARNINGS=$((WARNINGS + 1))
-    fi
+# 5. Playwright
+if [ -d node_modules/playwright ]; then
+  if node -e "const {chromium}=require('playwright'); const p=chromium.executablePath(); process.exit(require('fs').existsSync(p)?0:1)" 2>/dev/null; then
+    ok "Playwright Chromium binary present"
+  else
+    warn "Playwright package ok but Chromium missing — npx playwright install chromium"
+  fi
 else
-    echo -e "${YELLOW}⚠ Not installed${NC}"
-    WARNINGS=$((WARNINGS + 1))
+  warn "Playwright not installed"
 fi
 
 echo ""
 
-# Check 8: System dependencies (if Linux)
-if [ "$(uname)" == "Linux" ]; then
-    echo "8. Checking system dependencies..."
-    
-    DEPS=("libnss3" "libxcomposite1" "libxdamage1")
-    for dep in "${DEPS[@]}"; do
-        echo -n "   - $dep... "
-        if dpkg -l | grep -q "^ii  $dep"; then
-            echo -e "${GREEN}✓${NC}"
-        else
-            echo -e "${YELLOW}⚠ Missing${NC}"
-            WARNINGS=$((WARNINGS + 1))
-        fi
-    done
+# 6. Directories
+for d in data logs screenshots; do
+  mkdir -p "$d"
+  if [ -w "$d" ]; then
+    ok "$d/ writable"
+  else
+    fail "$d/ not writable"
+  fi
+done
+
+echo ""
+
+# 7. Ports
+PORT="${PORT:-8545}"
+if command -v lsof >/dev/null 2>&1; then
+  if lsof -Pi ":$PORT" -sTCP:LISTEN -t >/dev/null 2>&1; then
+    warn "Port $PORT already in use"
+  else
+    ok "Port $PORT available"
+  fi
+  if lsof -Pi :6379 -sTCP:LISTEN -t >/dev/null 2>&1; then
+    ok "Port 6379 in use (likely Redis)"
+  else
+    warn "Port 6379 not listening"
+  fi
 fi
 
 echo ""
 
-# Check 9: Disk space
-echo -n "9. Checking disk space... "
-AVAILABLE=$(df -h . | awk 'NR==2 {print $4}')
-echo -e "${GREEN}✓ $AVAILABLE available${NC}"
-
-# Check 10: Ports
-echo "10. Checking ports..."
-echo -n "   - Port 8545 (API)... "
-if lsof -Pi :8545 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo -e "${YELLOW}⚠ Already in use${NC}"
-    WARNINGS=$((WARNINGS + 1))
-else
-    echo -e "${GREEN}✓ Available${NC}"
-fi
-
-echo -n "   - Port 6379 (Redis)... "
-if lsof -Pi :6379 -sTCP:LISTEN -t >/dev/null 2>&1; then
-    echo -e "${GREEN}✓ In use (Redis)${NC}"
-else
-    echo -e "${YELLOW}⚠ Not in use${NC}"
-    WARNINGS=$((WARNINGS + 1))
-fi
+# 8. Disk
+AVAIL="$(df -h . | awk 'NR==2 {print $4}')"
+ok "Disk free: $AVAIL"
 
 echo ""
 echo "================================"
-echo ""
 
-# Summary
-if [ $ERRORS -eq 0 ] && [ $WARNINGS -eq 0 ]; then
-    echo -e "${GREEN}✅ All checks passed! Ready to deploy.${NC}"
-    echo ""
-    echo "Run: sudo ./deploy.sh"
-    exit 0
-elif [ $ERRORS -eq 0 ]; then
-    echo -e "${YELLOW}⚠️  $WARNINGS warning(s) found. Deployment possible but not optimal.${NC}"
-    echo ""
-    echo "You can proceed with: sudo ./deploy.sh"
-    exit 0
+if [ "$ERRORS" -eq 0 ] && [ "$WARNINGS" -eq 0 ]; then
+  echo -e "${GREEN}All checks passed.${NC}"
+  echo "Deploy: sudo ./deploy.sh"
+  echo "Or local: npm run setup -- --yes && npm run pm2:start"
+  exit 0
+elif [ "$ERRORS" -eq 0 ]; then
+  echo -e "${YELLOW}$WARNINGS warning(s) — deploy usually still works.${NC}"
+  echo "Deploy: sudo ./deploy.sh"
+  exit 0
 else
-    echo -e "${RED}❌ $ERRORS error(s) found. Please fix before deploying.${NC}"
-    if [ $WARNINGS -gt 0 ]; then
-        echo -e "${YELLOW}⚠️  $WARNINGS warning(s) also found.${NC}"
-    fi
-    echo ""
-    echo "Fix the errors above and run this script again."
-    exit 1
+  echo -e "${RED}$ERRORS error(s) — fix before deploying.${NC}"
+  [ "$WARNINGS" -gt 0 ] && echo -e "${YELLOW}$WARNINGS warning(s) also.${NC}"
+  exit 1
 fi

@@ -18,8 +18,10 @@ import {
 import { LlmProvider } from './llm';
 import { isInstalled } from './plugins';
 import dotenv from 'dotenv';
+import { ENV_PATH, ensureAppDirs } from './paths';
 
-dotenv.config();
+dotenv.config({ path: ENV_PATH });
+ensureAppDirs();
 getDb();
 
 const MAX_CONCURRENT = parseInt(process.env.MAX_CONCURRENT_TESTS || '3');

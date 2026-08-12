@@ -27,6 +27,7 @@ import { isInstalled } from '../plugins';
 import { LlmProvider, ToolDefinition } from '../llm';
 import { testQueue } from '../queue';
 import { logger } from '../utils/logger';
+import { getScreenshotsDir } from '../paths';
 
 function descriptionToText(content: unknown): string {
   if (!content) return '';
@@ -48,9 +49,7 @@ function extractTicketKey(ticketId?: string, ticketUrl?: string): string | null 
 }
 
 function screenshotPublicUrl(filePath: string): string {
-  const screenshotsRoot = path.resolve(
-    process.env.SCREENSHOTS_DIR || './screenshots'
-  );
+  const screenshotsRoot = getScreenshotsDir();
   const abs = path.resolve(filePath);
   if (abs.startsWith(screenshotsRoot)) {
     const rel = path.relative(screenshotsRoot, abs).split(path.sep).join('/');
@@ -64,10 +63,7 @@ function listTicketScreenshotFiles(ticketKey: string): Array<{
   path: string;
   url: string;
 }> {
-  const dir = path.join(
-    process.env.SCREENSHOTS_DIR || './screenshots',
-    ticketKey
-  );
+  const dir = path.join(getScreenshotsDir(), ticketKey);
   if (!fs.existsSync(dir)) return [];
   return fs
     .readdirSync(dir)
@@ -259,7 +255,8 @@ export type ToolEventEmitter = (event: {
 export class QaChatToolRunner {
   constructor(
     private sessionId: number,
-    private emit?: ToolEventEmitter
+    private emit?: ToolEventEmitter,
+    private signal?: AbortSignal
   ) {}
 
   private requireProjectId(): number {
@@ -273,6 +270,10 @@ export class QaChatToolRunner {
   }
 
   async run(name: string, argsJson: string): Promise<unknown> {
+    if (this.signal?.aborted) {
+      return { error: 'aborted' };
+    }
+
     let args: Record<string, unknown> = {};
     try {
       args = argsJson ? JSON.parse(argsJson) : {};
@@ -292,6 +293,15 @@ export class QaChatToolRunner {
       });
       return result;
     } catch (error: any) {
+      if (error?.name === 'AbortError' || this.signal?.aborted) {
+        this.emit?.({
+          type: 'tool_end',
+          tool: name,
+          detail: 'Detenido',
+          data: { error: 'aborted' },
+        });
+        return { error: 'aborted' };
+      }
       const message = error?.message || String(error);
       this.emit?.({
         type: 'tool_end',
@@ -771,6 +781,11 @@ export class QaChatToolRunner {
     ) {
       const deadline = Date.now() + waitMs;
       while (Date.now() < deadline) {
+        if (this.signal?.aborted) {
+          const err = new Error('Aborted');
+          err.name = 'AbortError';
+          throw err;
+        }
         this.emit?.({
           type: 'progress',
           tool: 'get_run_status',
@@ -778,7 +793,7 @@ export class QaChatToolRunner {
             status.progress != null ? ` · ${status.progress}%` : ''
           })`,
         });
-        await sleep(2000);
+        await sleep(2000, this.signal);
         status = await pollOnce();
         if (status.status === 'completed' || status.status === 'failed') break;
       }
@@ -788,8 +803,26 @@ export class QaChatToolRunner {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      reject(err);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      reject(err);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function toolLabel(name: string): string {

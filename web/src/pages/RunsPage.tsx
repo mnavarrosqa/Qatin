@@ -73,7 +73,7 @@ export function RunsPage() {
                     {statusLabel(run.status)}
                   </span>
                   <button
-                    className="btn btn-ghost"
+                    className="btn btn-ghost btn-compact"
                     type="button"
                     onClick={() => setSelected(run)}
                   >

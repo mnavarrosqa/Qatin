@@ -93,6 +93,14 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export type ChatUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  llmMs: number;
+  tokensPerSecond: number | null;
+};
+
 export type ChatSseEvent =
   | { type: 'token'; text: string }
   | { type: 'tool_start'; tool: string; detail?: string; data?: unknown }
@@ -102,6 +110,7 @@ export type ChatSseEvent =
       type: 'done';
       message: string;
       session: { id: number; project_id: number | null; title: string };
+      usage?: ChatUsage;
     }
   | { type: 'error'; error: string };
 
@@ -123,15 +132,17 @@ async function readChatSse(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
+  const consume = (chunk: string, flushTail = false) => {
+    buffer += chunk;
     const parts = buffer.split('\n\n');
-    buffer = parts.pop() || '';
+    if (flushTail) {
+      buffer = '';
+    } else {
+      buffer = parts.pop() || '';
+    }
 
     for (const part of parts) {
+      if (!part.trim()) continue;
       const lines = part.split('\n');
       let eventName = 'message';
       const dataLines: string[] = [];
@@ -147,6 +158,15 @@ async function readChatSse(
         // ignore malformed chunk
       }
     }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      consume(decoder.decode(), true);
+      break;
+    }
+    consume(decoder.decode(value, { stream: true }));
   }
 }
 
@@ -239,8 +259,14 @@ export const api = {
         agent_analyzer_instructions: string;
       };
     }>('/api/agent-prompts'),
-  listChatSessions: (limit = 50) =>
-    request<{ sessions: ChatSession[] }>(`/api/chat/sessions?limit=${limit}`),
+  listChatSessions: (limit = 50, projectId?: number | null) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (projectId === null) params.set('project_id', 'null');
+    else if (projectId != null) params.set('project_id', String(projectId));
+    return request<{ sessions: ChatSession[] }>(
+      `/api/chat/sessions?${params}`
+    );
+  },
   createChatSession: (body?: { project_id?: number | null; title?: string }) =>
     request<{ session: ChatSession }>('/api/chat/sessions', {
       method: 'POST',

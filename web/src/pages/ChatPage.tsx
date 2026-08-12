@@ -6,21 +6,73 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import {
   api,
-  type ChatMessage,
   type ChatSession,
+  type ChatUsage,
+  type LlmProvider,
   type Project,
+  type ProviderInfo,
 } from '../api';
 import {
   getChatGeneration,
+  getChatGenerationVersion,
   startChatGeneration,
   stopChatGeneration,
   subscribeChatGeneration,
+  toUiMessages,
   type UiMessage,
 } from '../chatGeneration';
 import { getFollowUps } from '../chatFollowUps';
+import { MessageBody } from '../chatMarkdown';
+
+const PROVIDER_SHORT: Record<LlmProvider, string> = {
+  openai: 'OpenAI',
+  deepseek: 'DeepSeek',
+  claude: 'Claude',
+  'openai-compatible': 'Compatible',
+  ollama: 'Ollama',
+};
+
+function toProjectFilter(id: number | ''): number | null {
+  return typeof id === 'number' ? id : null;
+}
+
+function resolveChatLlm(
+  project: Project | undefined,
+  providers: ProviderInfo[],
+  settings: Record<string, string>
+): { providerId: LlmProvider; label: string; model: string; fromProject: boolean } {
+  const globalProvider = (settings.llm_provider || 'openai') as LlmProvider;
+  const globalMeta = providers.find((p) => p.id === globalProvider);
+  const globalModel =
+    settings.llm_model ||
+    globalMeta?.configuredModel ||
+    globalMeta?.defaultModel ||
+    '';
+
+  const providerId = (project?.llm_provider || globalProvider) as LlmProvider;
+  const meta = providers.find((p) => p.id === providerId);
+  const inheritedModel =
+    providerId === globalProvider
+      ? globalModel
+      : meta?.configuredModel || meta?.defaultModel || globalModel;
+  const model = project?.llm_model || inheritedModel || '—';
+
+  const fromProject = Boolean(
+    (project?.llm_provider && project.llm_provider !== globalProvider) ||
+      (project?.llm_model && project.llm_model !== globalModel)
+  );
+
+  return {
+    providerId,
+    label: PROVIDER_SHORT[providerId] || meta?.label || providerId,
+    model,
+    fromProject,
+  };
+}
 
 const SUGGESTIONS = [
   {
@@ -49,20 +101,6 @@ const SUGGESTIONS = [
   },
 ];
 
-function toUiMessages(rows: ChatMessage[]): UiMessage[] {
-  return rows
-    .filter((m) => m.content && (m.role === 'user' || m.role === 'assistant'))
-    .map((m) =>
-      m.role === 'user'
-        ? { kind: 'user' as const, id: String(m.id), content: m.content || '' }
-        : {
-            kind: 'assistant' as const,
-            id: String(m.id),
-            content: m.content || '',
-          }
-    );
-}
-
 function relativeTime(iso: string): string {
   const then = Date.parse(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
   if (Number.isNaN(then)) return iso;
@@ -80,197 +118,41 @@ function relativeTime(iso: string): string {
   });
 }
 
-function extractScreenshots(text: string): string[] {
-  const matches = text.match(/\/screenshots\/[^\s)]+/g);
-  return matches ? [...new Set(matches)] : [];
+function formatCount(n: number): string {
+  return n.toLocaleString('es-AR');
 }
 
-function renderInline(text: string, keyPrefix: string) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`|\/screenshots\/[^\s)]+|[A-Z][A-Z0-9]+-\d+)/g);
-  return parts.map((part, i) => {
-    const key = `${keyPrefix}-${i}`;
-    if (part.startsWith('**') && part.endsWith('**')) {
-      return <strong key={key}>{part.slice(2, -2)}</strong>;
-    }
-    if (part.startsWith('`') && part.endsWith('`')) {
-      return <code key={key}>{part.slice(1, -1)}</code>;
-    }
-    if (part.startsWith('/screenshots/')) {
-      return null;
-    }
-    if (/^[A-Z][A-Z0-9]+-\d+$/.test(part)) {
-      return (
-        <span key={key} className="chat-ticket">
-          {part}
-        </span>
-      );
-    }
-    return <span key={key}>{part}</span>;
+function formatUsageLine(u: ChatUsage): string {
+  const tokens = `${formatCount(u.totalTokens)} tokens`;
+  if (u.tokensPerSecond == null) return tokens;
+  const speed = u.tokensPerSecond.toLocaleString('es-AR', {
+    maximumFractionDigits: 1,
   });
+  return `${tokens} · ${speed} tok/s`;
 }
 
-type ContentBlock =
-  | { type: 'heading'; level: 2 | 3; text: string }
-  | { type: 'para'; text: string }
-  | { type: 'ul'; items: string[] }
-  | { type: 'ol'; items: string[] }
-  | { type: 'code'; text: string };
-
-function parseBlocks(text: string): ContentBlock[] {
-  const blocks: ContentBlock[] = [];
-  const fenceSplit = text.split(/(```[\s\S]*?```)/g);
-
-  for (const chunk of fenceSplit) {
-    if (!chunk) continue;
-    if (chunk.startsWith('```') && chunk.endsWith('```')) {
-      const inner = chunk.slice(3, -3).replace(/^\w*\n?/, '');
-      blocks.push({ type: 'code', text: inner.replace(/\n$/, '') });
-      continue;
-    }
-
-    const paragraphs = chunk.split(/\n{2,}/);
-    for (const para of paragraphs) {
-      const trimmed = para.trim();
-      if (!trimmed) continue;
-
-      const lines = trimmed.split('\n');
-      const nonEmpty = lines.filter((l) => l.trim());
-
-      if (/^#{2,3}\s+/.test(trimmed) && nonEmpty.length === 1) {
-        const level = trimmed.startsWith('###') ? 3 : 2;
-        blocks.push({
-          type: 'heading',
-          level,
-          text: trimmed.replace(/^#{2,3}\s+/, ''),
-        });
-        continue;
-      }
-
-      const isUl = nonEmpty.every((l) => /^[-*•]\s+/.test(l.trim()));
-      if (isUl && nonEmpty.length) {
-        blocks.push({
-          type: 'ul',
-          items: nonEmpty.map((l) => l.trim().replace(/^[-*•]\s+/, '')),
-        });
-        continue;
-      }
-
-      const isOl = nonEmpty.every((l) => /^\d+[.)]\s+/.test(l.trim()));
-      if (isOl && nonEmpty.length) {
-        blocks.push({
-          type: 'ol',
-          items: nonEmpty.map((l) => l.trim().replace(/^\d+[.)]\s+/, '')),
-        });
-        continue;
-      }
-
-      blocks.push({ type: 'para', text: trimmed });
-    }
+function usageTitle(u: ChatUsage): string {
+  const parts = [
+    `Entrada ${formatCount(u.promptTokens)}`,
+    `salida ${formatCount(u.completionTokens)}`,
+  ];
+  if (u.llmMs > 0) {
+    const sec = u.llmMs / 1000;
+    parts.push(
+      `${sec.toLocaleString('es-AR', { maximumFractionDigits: 1 })} s de modelo`
+    );
   }
-
-  return blocks;
-}
-
-function MessageBody({
-  text,
-  streaming = false,
-}: {
-  text: string;
-  streaming?: boolean;
-}) {
-  const shots = extractScreenshots(text);
-  const cleaned = text
-    .replace(/\/screenshots\/[^\s)]+/g, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-
-  const blocks = cleaned ? parseBlocks(cleaned) : [];
-
-  return (
-    <div className="chat-content">
-      {blocks.map((block, bi) => {
-        const key = `b-${bi}`;
-        if (block.type === 'heading') {
-          const Tag = block.level === 3 ? 'h4' : 'h3';
-          return (
-            <Tag key={key} className={`chat-heading chat-heading-${block.level}`}>
-              {renderInline(block.text, key)}
-            </Tag>
-          );
-        }
-        if (block.type === 'code') {
-          return (
-            <pre key={key} className="chat-code">
-              <code>{block.text}</code>
-            </pre>
-          );
-        }
-        if (block.type === 'ul') {
-          return (
-            <ul key={key} className="chat-list">
-              {block.items.map((item, li) => (
-                <li key={li}>{renderInline(item, `${key}-${li}`)}</li>
-              ))}
-            </ul>
-          );
-        }
-        if (block.type === 'ol') {
-          return (
-            <ol key={key} className="chat-list chat-list-ol">
-              {block.items.map((item, li) => (
-                <li key={li}>{renderInline(item, `${key}-${li}`)}</li>
-              ))}
-            </ol>
-          );
-        }
-        const lines = block.text.split('\n');
-        return (
-          <p key={key} className="chat-para">
-            {lines.map((line, li) => (
-              <span key={li}>
-                {li > 0 && <br />}
-                {renderInline(line, `${key}-${li}`)}
-              </span>
-            ))}
-          </p>
-        );
-      })}
-      {streaming && <span className="chat-stream-caret" aria-hidden />}
-      {shots.length > 0 && (
-        <div className="chat-shots">
-          <p className="chat-shots-label">Evidencias</p>
-          <div className="chat-shots-grid">
-            {shots.map((url, i) => (
-              <a
-                key={url}
-                className="chat-shot-link"
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                title="Abrir evidencia"
-              >
-                <img
-                  className="chat-shot"
-                  src={url}
-                  alt={`Evidencia ${i + 1}`}
-                  loading="lazy"
-                />
-                <span className="chat-shot-cap">Ver completa</span>
-              </a>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return parts.join(' · ');
 }
 
 export function ChatPage({ active = true }: { active?: boolean }) {
-  const generation = useSyncExternalStore(
+  // Subscribe to a primitive version so React always re-renders on store updates
+  useSyncExternalStore(
     subscribeChatGeneration,
-    getChatGeneration,
-    getChatGeneration
+    getChatGenerationVersion,
+    getChatGenerationVersion
   );
+  const generation = getChatGeneration();
 
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -283,15 +165,17 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [savingProject, setSavingProject] = useState(false);
-  const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [settings, setSettings] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bootstrappedRef = useRef(false);
+  const selectedProjectIdRef = useRef(selectedProjectId);
+  selectedProjectIdRef.current = selectedProjectId;
+  const [sessionsSlot, setSessionsSlot] = useState<HTMLElement | null>(null);
 
   const liveForActive =
-    generation && (activeId == null || generation.sessionId === activeId)
-      ? generation
-      : null;
+    generation && generation.sessionId === activeId ? generation : null;
   const viewMessages = liveForActive ? liveForActive.messages : messages;
   const viewBusy = liveForActive ? liveForActive.busy : busy;
   const viewSession = liveForActive?.session || session;
@@ -306,6 +190,11 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     if (liveForActive.session) {
       setSession(liveForActive.session);
       if (activeId == null) setActiveId(liveForActive.sessionId);
+      const pid = liveForActive.session.project_id ?? '';
+      if (pid !== selectedProjectIdRef.current) {
+        setSelectedProjectId(pid);
+        refreshSessions(toProjectFilter(pid)).catch(() => undefined);
+      }
     }
   }, [liveForActive, activeId]);
 
@@ -320,10 +209,21 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
   }, [input]);
 
-  async function refreshSessions() {
-    const res = await api.listChatSessions();
+  async function refreshSessions(projectId?: number | null) {
+    const filter =
+      projectId !== undefined
+        ? projectId
+        : toProjectFilter(selectedProjectIdRef.current);
+    const res = await api.listChatSessions(50, filter);
     setSessions(res.sessions);
     return res.sessions;
+  }
+
+  function clearThread() {
+    setActiveId(null);
+    setSession(null);
+    setMessages([]);
+    setBusy(false);
   }
 
   async function openSession(id: number) {
@@ -331,25 +231,31 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     if (live && live.sessionId === id) {
       setActiveId(id);
       setSession(live.session);
-      setSelectedProjectId(live.session?.project_id ?? '');
       setMessages(live.messages);
       setBusy(live.busy);
       setError(live.error || '');
-      setSessionsOpen(false);
       return;
     }
 
     const res = await api.getChatSession(id);
     setActiveId(id);
     setSession(res.session);
-    setSelectedProjectId(res.session.project_id ?? '');
     setMessages(toUiMessages(res.messages));
     setBusy(false);
     setError('');
-    setSessionsOpen(false);
     requestAnimationFrame(() => {
       if (inputRef.current && active) inputRef.current.focus();
     });
+  }
+
+  async function refreshLlmInfo() {
+    try {
+      const [p, s] = await Promise.all([api.getProviders(), api.getSettings()]);
+      setProviders(p.providers);
+      setSettings(s.settings);
+    } catch {
+      // Non-blocking: header meta can stay empty
+    }
   }
 
   async function bootstrap() {
@@ -360,22 +266,44 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     let loadError = '';
     try {
       const live = getChatGeneration();
-      const projResult = await api.listProjects().catch((e: Error) => {
-        loadError = e.message;
-        return { projects: [] as Project[] };
-      });
+      const [projResult, ,] = await Promise.all([
+        api.listProjects().catch((e: Error) => {
+          loadError = e.message;
+          return { projects: [] as Project[] };
+        }),
+        refreshLlmInfo(),
+      ]);
       setProjects(projResult.projects);
 
-      const sessResult = await api.listChatSessions().catch((e: Error) => {
-        loadError = loadError || e.message;
-        return { sessions: [] as ChatSession[] };
-      });
+      let projectId: number | '' = '';
+      if (live?.session) {
+        projectId = live.session.project_id ?? '';
+      } else {
+        const recent = await api.listChatSessions(1).catch((e: Error) => {
+          loadError = loadError || e.message;
+          return { sessions: [] as ChatSession[] };
+        });
+        if (recent.sessions[0]?.project_id != null) {
+          projectId = recent.sessions[0].project_id;
+        } else if (projResult.projects.length === 1) {
+          projectId = projResult.projects[0].id;
+        } else if (!recent.sessions[0] && projResult.projects.length) {
+          projectId = projResult.projects[0].id;
+        }
+      }
+      setSelectedProjectId(projectId);
+
+      const sessResult = await api
+        .listChatSessions(50, toProjectFilter(projectId))
+        .catch((e: Error) => {
+          loadError = loadError || e.message;
+          return { sessions: [] as ChatSession[] };
+        });
       setSessions(sessResult.sessions);
 
       if (live) {
         setActiveId(live.sessionId);
         setSession(live.session);
-        setSelectedProjectId(live.session?.project_id ?? '');
         setMessages(live.messages);
         setBusy(live.busy);
         if (live.error) setError(live.error);
@@ -395,12 +323,19 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     bootstrap();
   }, []);
 
+  useEffect(() => {
+    setSessionsSlot(document.getElementById('chat-sessions-root'));
+  }, [active]);
+
   // When returning to chat, sync from server if the turn already finished
   const wasActiveRef = useRef(active);
   useEffect(() => {
     const becameActive = active && !wasActiveRef.current;
     wasActiveRef.current = active;
-    if (!becameActive || !activeId) return;
+    if (!becameActive) return;
+
+    refreshLlmInfo();
+    if (!activeId) return;
 
     const live = getChatGeneration();
     if (live?.busy && live.sessionId === activeId) return;
@@ -413,9 +348,13 @@ export function ChatPage({ active = true }: { active?: boolean }) {
         const stillLive = getChatGeneration();
         if (stillLive?.busy && stillLive.sessionId === activeId) return;
         setSession(res.session);
-        setSelectedProjectId(res.session.project_id ?? '');
         setMessages(toUiMessages(res.messages));
         setBusy(false);
+        const pid = res.session.project_id ?? '';
+        if (pid !== selectedProjectIdRef.current) {
+          setSelectedProjectId(pid);
+          refreshSessions(toProjectFilter(pid)).catch(() => undefined);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -428,16 +367,18 @@ export function ChatPage({ active = true }: { active?: boolean }) {
     const projectId =
       preferredProjectId != null && preferredProjectId > 0
         ? preferredProjectId
-        : projects.length === 1
-          ? projects[0].id
-          : null;
+        : typeof selectedProjectId === 'number'
+          ? selectedProjectId
+          : projects.length === 1
+            ? projects[0].id
+            : null;
     const { session: created } = await api.createChatSession({
       project_id: projectId,
     });
     setActiveId(created.id);
     setSession(created);
-    setSelectedProjectId(created.project_id ?? '');
-    await refreshSessions();
+    if (created.project_id != null) setSelectedProjectId(created.project_id);
+    await refreshSessions(created.project_id);
     return created.id;
   }
 
@@ -450,10 +391,13 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           : projects.length === 1
             ? projects[0].id
             : null;
+      if (projectId != null && selectedProjectId !== projectId) {
+        setSelectedProjectId(projectId);
+      }
       const { session: created } = await api.createChatSession({
         project_id: projectId,
       });
-      await refreshSessions();
+      await refreshSessions(created.project_id);
       await openSession(created.id);
       setMessages([]);
       setInput('');
@@ -469,13 +413,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
       const next = await refreshSessions();
       if (activeId === id) {
         if (next.length) await openSession(next[0].id);
-        else {
-          setActiveId(null);
-          setSession(null);
-          setSelectedProjectId('');
-          setMessages([]);
-          setBusy(false);
-        }
+        else clearThread();
       }
     } catch (e: any) {
       setError(e.message);
@@ -484,19 +422,18 @@ export function ChatPage({ active = true }: { active?: boolean }) {
 
   async function onSelectProject(raw: string) {
     const nextId = raw ? Number(raw) : null;
+    const nextSelected: number | '' = nextId ?? '';
     const previous = selectedProjectId;
-    setSelectedProjectId(nextId ?? '');
+    const belongs =
+      viewSession != null && (viewSession.project_id ?? '') === nextSelected;
+
+    setSelectedProjectId(nextSelected);
     setSavingProject(true);
     setError('');
+    if (!belongs) clearThread();
     try {
-      const id = await ensureSession(nextId);
-      const { session: updated } = await api.updateChatSession(id, {
-        project_id: nextId,
-      });
-      setSession(updated);
-      setSelectedProjectId(updated.project_id ?? '');
-      setActiveId(updated.id);
-      await refreshSessions();
+      const next = await refreshSessions(nextId);
+      if (!belongs && next.length) await openSession(next[0].id);
     } catch (e: any) {
       setSelectedProjectId(previous);
       setError(e.message || 'No se pudo cambiar el proyecto');
@@ -575,92 +512,113 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const activeProject = projects.find(
     (p) => p.id === (typeof selectedProjectId === 'number' ? selectedProjectId : -1)
   );
+  const chatLlm = resolveChatLlm(activeProject, providers, settings);
   const needsProject = projects.length > 0 && selectedProjectId === '';
   const noProjects = projects.length === 0 && !loading;
   const followUps =
     !viewBusy && !noProjects ? getFollowUps(viewMessages) : [];
 
-  return (
-    <div className={`chat-page${sessionsOpen ? ' sessions-open' : ''}`}>
-      <aside className="chat-sessions" aria-label="Conversaciones">
-        <div className="chat-sessions-head">
-          <h2>Chats</h2>
-          <button
-            type="button"
-            className="btn btn-compact"
-            onClick={newChat}
-          >
-            Nuevo
-          </button>
-        </div>
+  const sessionsPanel = (
+    <aside className="chat-sessions" aria-label="Conversaciones">
+      <div className="chat-sessions-head">
+        <h2>Chats</h2>
+        <button type="button" className="btn btn-compact" onClick={newChat}>
+          Nuevo
+        </button>
+      </div>
 
-        {loading ? (
-          <div className="chat-skel-list" aria-hidden>
-            <div className="chat-skel" />
-            <div className="chat-skel" />
-            <div className="chat-skel" />
-          </div>
-        ) : sessions.length === 0 ? (
-          <p className="chat-sessions-empty">
-            Todavía no hay conversaciones. Empezá abajo.
-          </p>
-        ) : (
-          <ul className="chat-session-list">
-            {sessions.map((s) => (
-              <li key={s.id} className="chat-session-row">
-                <button
-                  type="button"
-                  className={
-                    s.id === activeId
-                      ? 'chat-session-item active'
-                      : 'chat-session-item'
-                  }
-                  onClick={() => openSession(s.id)}
-                >
-                  <span className="chat-session-title">{s.title}</span>
-                  <span className="chat-session-meta">
-                    {relativeTime(s.updated_at)}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className="chat-session-delete"
-                  aria-label={`Eliminar ${s.title}`}
-                  title="Eliminar"
-                  onClick={(ev) => {
-                    ev.stopPropagation();
-                    deleteSession(s.id);
-                  }}
-                >
-                  ×
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </aside>
+      {loading ? (
+        <div className="chat-skel-list" aria-hidden>
+          <div className="chat-skel" />
+          <div className="chat-skel" />
+          <div className="chat-skel" />
+        </div>
+      ) : sessions.length === 0 ? (
+        <p className="chat-sessions-empty">
+          {selectedProjectId === ''
+            ? 'Todavía no hay conversaciones. Elegí un proyecto o empezá abajo.'
+            : 'Todavía no hay conversaciones en este proyecto.'}
+        </p>
+      ) : (
+        <ul className="chat-session-list">
+          {sessions.map((s) => (
+            <li key={s.id} className="chat-session-row">
+              <button
+                type="button"
+                className={
+                  s.id === activeId
+                    ? 'chat-session-item active'
+                    : 'chat-session-item'
+                }
+                onClick={() => openSession(s.id)}
+              >
+                <span className="chat-session-title">{s.title}</span>
+                <span className="chat-session-meta">
+                  {relativeTime(s.updated_at)}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="chat-session-delete"
+                aria-label={`Eliminar ${s.title}`}
+                title="Eliminar"
+                onClick={(ev) => {
+                  ev.stopPropagation();
+                  deleteSession(s.id);
+                }}
+              >
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </aside>
+  );
+
+  return (
+    <div className="chat-page">
+      {sessionsSlot && active ? createPortal(sessionsPanel, sessionsSlot) : null}
 
       <section className="chat-main">
         <header className="chat-head">
           <div className="chat-head-copy">
-            <button
-              type="button"
-              className="chat-sessions-toggle"
-              onClick={() => setSessionsOpen((v) => !v)}
-              aria-expanded={sessionsOpen}
-            >
-              Chats
-            </button>
             <h1>{viewSession?.title || 'Agente QA'}</h1>
-            <p>Decile qué ticket mirar, qué probar o qué evidencias necesitás.</p>
+            {(providers.length > 0 || settings.llm_provider) && (
+              <p
+                className="chat-llm-meta"
+                title={
+                  chatLlm.fromProject
+                    ? 'Modelo del proyecto activo (pisa el default global)'
+                    : 'Modelo por defecto de Configuración'
+                }
+              >
+                <span className="chat-llm-provider">{chatLlm.label}</span>
+                <span aria-hidden="true"> · </span>
+                <span className="chat-llm-model">{chatLlm.model}</span>
+                {chatLlm.fromProject ? (
+                  <span className="chat-llm-source"> proyecto</span>
+                ) : null}
+              </p>
+            )}
           </div>
 
           <div className="chat-project-picker">
-            <label htmlFor="chat-project">Proyecto activo</label>
+            <label htmlFor="chat-project">Proyecto</label>
             <select
               id="chat-project"
               value={selectedProjectId === '' ? '' : String(selectedProjectId)}
-              disabled={viewBusy || savingProject || projects.length === 0}
+              disabled={savingProject || projects.length === 0}
+              title={
+                activeProject
+                  ? [
+                      activeProject.base_url || 'sin URL base',
+                      activeProject.jira_project_key,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : undefined
+              }
               onChange={(e) => onSelectProject(e.target.value)}
             >
               <option value="">Elegí un proyecto…</option>
@@ -670,16 +628,6 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                 </option>
               ))}
             </select>
-            {savingProject && <p className="hint">Guardando…</p>}
-            {activeProject && !savingProject && (
-              <p className="hint chat-project-meta">
-                <span className="chat-dot ok" />
-                {activeProject.base_url || 'sin URL base'}
-                {activeProject.jira_project_key
-                  ? ` · ${activeProject.jira_project_key}`
-                  : ''}
-              </p>
-            )}
           </div>
         </header>
 
@@ -763,6 +711,10 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               m.kind === 'assistant' &&
               mi === viewMessages.length - 1 &&
               followUps.length > 0;
+            const visibleTools =
+              m.kind === 'assistant'
+                ? (m.tools || []).filter((t) => t.tool && t.tool !== 'progress')
+                : [];
 
             return (
               <article
@@ -788,27 +740,28 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                       </span>
                     </div>
                   )}
-                  {m.kind === 'assistant' && m.tools && m.tools.length > 0 && (
+                  {visibleTools.length > 0 && (
                     <ol className="chat-tools" aria-label="Acciones del agente">
-                      {m.tools.map((t, idx) => (
-                        <li
-                          key={`${t.tool}-${idx}`}
-                          className={
-                            t.status === 'running' ? 'running' : 'done'
-                          }
-                        >
-                          <span className="chat-tool-mark" aria-hidden>
-                            {t.status === 'running' ? (
-                              <span className="chat-tool-spin" />
-                            ) : (
-                              '✓'
-                            )}
-                          </span>
-                          <span className="chat-tool-label">
-                            {t.detail || t.tool}
-                          </span>
-                        </li>
-                      ))}
+                      {visibleTools.map((t, idx) => {
+                        const running = t.status === 'running' && viewBusy;
+                        return (
+                          <li
+                            key={`${t.tool}-${idx}`}
+                            className={running ? 'running' : 'done'}
+                          >
+                            <span className="chat-tool-mark" aria-hidden>
+                              {running ? (
+                                <span className="chat-tool-spin" />
+                              ) : (
+                                '✓'
+                              )}
+                            </span>
+                            <span className="chat-tool-label">
+                              {t.detail || t.tool}
+                            </span>
+                          </li>
+                        );
+                      })}
                     </ol>
                   )}
                   {m.content ? (
@@ -825,6 +778,11 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                           'Trabajando…'}
                       </span>
                     </div>
+                  ) : null}
+                  {m.kind === 'assistant' && m.usage && m.content ? (
+                    <p className="chat-usage" title={usageTitle(m.usage)}>
+                      {formatUsageLine(m.usage)}
+                    </p>
                   ) : null}
                   {showFollowUps && (
                     <div
@@ -881,8 +839,9 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                 {viewBusy ? (
                   <button
                     type="button"
-                    className="btn btn-ghost btn-compact"
+                    className="btn btn-danger btn-compact"
                     onClick={stopGeneration}
+                    aria-label="Detener consulta"
                   >
                     Detener
                   </button>
@@ -900,15 +859,6 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           </div>
         </form>
       </section>
-
-      {sessionsOpen && (
-        <button
-          type="button"
-          className="chat-sessions-backdrop"
-          aria-label="Cerrar lista de chats"
-          onClick={() => setSessionsOpen(false)}
-        />
-      )}
     </div>
   );
 }

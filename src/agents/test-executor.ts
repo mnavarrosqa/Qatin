@@ -4,6 +4,7 @@ import fs from 'fs/promises';
 import { logger } from '../utils/logger';
 import { TestStrategy, TestScenario } from './ticket-analyzer';
 import { getRuntimePlugins, RuntimePlugins } from '../plugins';
+import { getScreenshotsDir } from '../paths';
 
 export interface ExecutionResult {
   success: boolean;
@@ -54,7 +55,7 @@ export class TestExecutor {
   private plugins: RuntimePlugins;
 
   constructor(config?: ExecutorConfig) {
-    this.screenshotsDir = process.env.SCREENSHOTS_DIR || './screenshots';
+    this.screenshotsDir = getScreenshotsDir();
     this.baseUrl =
       config?.baseUrl || process.env.APP_BASE_URL || 'https://example.com';
     this.testUserEmail =

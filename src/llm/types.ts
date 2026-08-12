@@ -52,11 +52,52 @@ export interface AgentChatRequest {
   messages: AgentMessage[];
   tools?: ToolDefinition[];
   temperature?: number;
+  /** Cancel in-flight provider call when the client disconnects / user stops. */
+  signal?: AbortSignal;
+}
+
+export interface LlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface LlmTurnUsage extends LlmUsage {
+  llmMs: number;
+  tokensPerSecond: number | null;
+}
+
+export function emptyUsage(): LlmUsage {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+export function addUsage(acc: LlmUsage, extra?: LlmUsage | null): LlmUsage {
+  if (!extra) return acc;
+  const promptTokens = acc.promptTokens + (extra.promptTokens || 0);
+  const completionTokens = acc.completionTokens + (extra.completionTokens || 0);
+  const totalTokens =
+    acc.totalTokens +
+    (extra.totalTokens || extra.promptTokens + extra.completionTokens || 0);
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+export function toTurnUsage(acc: LlmUsage, llmMs: number): LlmTurnUsage | undefined {
+  if (acc.totalTokens <= 0) return undefined;
+  const sec = llmMs / 1000;
+  return {
+    ...acc,
+    llmMs,
+    tokensPerSecond:
+      sec > 0 && acc.completionTokens > 0
+        ? Math.round((acc.completionTokens / sec) * 10) / 10
+        : null,
+  };
 }
 
 export interface AgentChatResponse {
   content: string | null;
   tool_calls?: ToolCall[];
+  usage?: LlmUsage;
 }
 
 export const PROVIDER_DEFAULTS: Record<

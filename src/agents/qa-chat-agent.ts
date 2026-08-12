@@ -5,6 +5,10 @@ import {
   LlmProvider,
   PromptTier,
   getPromptTier,
+  addUsage,
+  emptyUsage,
+  toTurnUsage,
+  type LlmTurnUsage,
 } from '../llm';
 import {
   getChatSession,
@@ -30,6 +34,7 @@ export type ChatAgentEvent =
       type: 'done';
       message: string;
       session: { id: number; project_id: number | null; title: string };
+      usage?: LlmTurnUsage;
     }
   | { type: 'error'; error: string };
 
@@ -63,6 +68,7 @@ Rules:
 - If user pastes free text (not a ticket key): treat it as a feature description using fetch_ticket with pasted_summary + pasted_description.
 - Use list_recent_runs to give context on what was already tested.
 - Use lists, keep responses short. If the ticket is ambiguous, ask before generating cases.
+- Format scenarios as \`### Short title\` or \`1. **Title**\` plus bullets of what will be tested. Do not repeat “En este escenario, se probará:”. Keep numbered lists contiguous (1, 2, 3…); never restart at 1. Put detail in the bullets, not in long paragraphs.
 - If user asks for Xray export/import: output a complete CSV (Summary, Description, Test Type, Step, Data, Expected Result) ready to download/import. Do not invent ticket facts — use fetch_ticket / analyze_ticket / list_test_cases first.`;
 
 const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, save_test_cases, enqueue_run, get_run_status, list_projects, set_active_project, list_test_cases, list_recent_runs.
@@ -73,7 +79,8 @@ Rules:
 - Include screenshot URLs (/screenshots/...) when available.
 - Pasted text (not a key): use fetch_ticket with pasted_summary + pasted_description.
 - Xray export: full CSV (Summary, Description, Test Type, Step, Data, Expected Result).
-- Keep responses short, use lists.`;
+- Keep responses short, use lists.
+- Scenarios: \`### Title\` or \`1. **Title**\` + bullets. No repeated “En este escenario…”. Number 1, 2, 3… without restarting.`;
 
 export function getDefaultChatInstructions(tier: PromptTier): string {
   return tier === 'compact'
@@ -165,6 +172,15 @@ function friendlyLlmError(error: unknown): string {
   return raw;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  const err = new Error('Aborted');
+  err.name = 'AbortError';
+  throw err;
+}
+
+const STOPPED_MESSAGE = 'Consulta detenida.';
+
 function isProjectsInventoryQuestion(text: string): boolean {
   const t = text.trim().toLowerCase();
   if (!t) return false;
@@ -202,8 +218,9 @@ export async function runQaChatTurn(opts: {
   sessionId: number;
   userMessage: string;
   onEvent: (event: ChatAgentEvent) => void;
+  signal?: AbortSignal;
 }): Promise<void> {
-  const { sessionId, userMessage, onEvent } = opts;
+  const { sessionId, userMessage, onEvent, signal } = opts;
 
   const session = getChatSession(sessionId);
   if (!session) {
@@ -228,6 +245,20 @@ export async function runQaChatTurn(opts: {
   const projects = listProjects();
   const projectDirectory = formatProjectDirectory(projects);
 
+  const emitDone = (message: string, usage?: LlmTurnUsage) => {
+    const endSession = getChatSession(sessionId)!;
+    onEvent({
+      type: 'done',
+      message,
+      session: {
+        id: endSession.id,
+        project_id: endSession.project_id,
+        title: endSession.title,
+      },
+      ...(usage ? { usage } : {}),
+    });
+  };
+
   // Fast path: listing projects does not need the LLM (avoids Ollama tool stalls).
   if (isProjectsInventoryQuestion(userMessage)) {
     const msg = answerProjectsInventory(projects);
@@ -237,16 +268,7 @@ export async function runQaChatTurn(opts: {
       content: msg,
     });
     onEvent({ type: 'token', text: msg });
-    const endSession = getChatSession(sessionId)!;
-    onEvent({
-      type: 'done',
-      message: msg,
-      session: {
-        id: endSession.id,
-        project_id: endSession.project_id,
-        title: endSession.title,
-      },
-    });
+    emitDone(msg);
     return;
   }
 
@@ -282,19 +304,12 @@ export async function runQaChatTurn(opts: {
       content: msg,
     });
     onEvent({ type: 'token', text: msg });
-    onEvent({
-      type: 'done',
-      message: msg,
-      session: {
-        id: sessionId,
-        project_id: getChatSession(sessionId)?.project_id ?? null,
-        title: getChatSession(sessionId)?.title || 'Nueva conversación',
-      },
-    });
+    emitDone(msg);
     return;
   }
 
   const emitTools: ToolEventEmitter = (ev) => {
+    if (signal?.aborted) return;
     if (ev.type === 'tool_start') {
       onEvent({
         type: 'tool_start',
@@ -319,7 +334,7 @@ export async function runQaChatTurn(opts: {
     }
   };
 
-  const tools = new QaChatToolRunner(sessionId, emitTools);
+  const tools = new QaChatToolRunner(sessionId, emitTools, signal);
   const refreshed = getChatSession(sessionId)!;
 
   const messages: AgentMessage[] = [
@@ -337,15 +352,38 @@ export async function runQaChatTurn(opts: {
   ];
 
   let finalText = '';
+  let usageAcc = emptyUsage();
+  let llmMs = 0;
   onEvent({ type: 'progress', detail: 'Consultando al modelo…' });
+
+  const emitStopped = () => {
+    const msg = STOPPED_MESSAGE;
+    const usage = toTurnUsage(usageAcc, llmMs);
+    createChatMessage({
+      session_id: sessionId,
+      role: 'assistant',
+      content: msg,
+      ...(usage ? { meta: { usage } } : {}),
+    });
+    onEvent({ type: 'token', text: msg });
+    emitDone(msg, usage);
+  };
 
   try {
     for (let i = 0; i < MAX_ITERATIONS; i++) {
+      throwIfAborted(signal);
+
+      const started = Date.now();
       const response = await client.agentChat({
         messages,
         tools: QA_CHAT_TOOLS,
         temperature: 0.3,
+        signal,
       });
+      llmMs += Date.now() - started;
+      usageAcc = addUsage(usageAcc, response.usage);
+
+      throwIfAborted(signal);
 
       if (response.tool_calls?.length) {
         createChatMessage({
@@ -361,7 +399,30 @@ export async function runQaChatTurn(opts: {
           tool_calls: response.tool_calls,
         });
 
-        for (const call of response.tool_calls) {
+        for (let ti = 0; ti < response.tool_calls.length; ti++) {
+          if (signal?.aborted) {
+            for (let rj = ti; rj < response.tool_calls.length; rj++) {
+              const rem = response.tool_calls[rj];
+              const content = JSON.stringify({ error: 'aborted' });
+              createChatMessage({
+                session_id: sessionId,
+                role: 'tool',
+                content,
+                tool_name: rem.function.name,
+                tool_call_id: rem.id,
+                meta: { result: { error: 'aborted' } },
+              });
+              messages.push({
+                role: 'tool',
+                content,
+                tool_call_id: rem.id,
+                name: rem.function.name,
+              });
+            }
+            throwIfAborted(signal);
+          }
+
+          const call = response.tool_calls[ti];
           const result = await tools.run(
             call.function.name,
             call.function.arguments || '{}'
@@ -406,55 +467,49 @@ export async function runQaChatTurn(opts: {
         response.content?.trim() ||
         'Listo. ¿Querés que analice otro ticket o que ejecute tests?';
 
+      const usage = toTurnUsage(usageAcc, llmMs);
       createChatMessage({
         session_id: sessionId,
         role: 'assistant',
         content: finalText,
+        ...(usage ? { meta: { usage } } : {}),
       });
       onEvent({ type: 'token', text: finalText });
       break;
     }
 
     if (!finalText) {
+      throwIfAborted(signal);
       finalText =
         'Alcancé el límite de pasos del agente. Probá reformular el pedido o pedime el estado del run.';
+      const usage = toTurnUsage(usageAcc, llmMs);
       createChatMessage({
         session_id: sessionId,
         role: 'assistant',
         content: finalText,
+        ...(usage ? { meta: { usage } } : {}),
       });
       onEvent({ type: 'token', text: finalText });
     }
 
-    const endSession = getChatSession(sessionId)!;
-    onEvent({
-      type: 'done',
-      message: finalText,
-      session: {
-        id: endSession.id,
-        project_id: endSession.project_id,
-        title: endSession.title,
-      },
-    });
+    emitDone(finalText, toTurnUsage(usageAcc, llmMs));
   } catch (error: any) {
+    if (signal?.aborted) {
+      logger.info('QaChatAgent turn aborted', { sessionId });
+      emitStopped();
+      return;
+    }
     logger.error('QaChatAgent turn failed', error);
     const msg = friendlyLlmError(error);
+    const usage = toTurnUsage(usageAcc, llmMs);
     createChatMessage({
       session_id: sessionId,
       role: 'assistant',
       content: msg,
+      ...(usage ? { meta: { usage } } : {}),
     });
     onEvent({ type: 'token', text: msg });
     onEvent({ type: 'error', error: msg });
-    const endSession = getChatSession(sessionId)!;
-    onEvent({
-      type: 'done',
-      message: msg,
-      session: {
-        id: endSession.id,
-        project_id: endSession.project_id,
-        title: endSession.title,
-      },
-    });
+    emitDone(msg, usage);
   }
 }

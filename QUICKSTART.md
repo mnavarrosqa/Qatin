@@ -15,66 +15,23 @@ Abrí http://localhost:8545
 
 ---
 
-## Opción 1: Ubuntu Server (Recomendado para producción)
-
-### Paso 1: Preparar servidor
+## Opción 1: Ubuntu Server (producción)
 
 ```bash
-# Conectarse al servidor
-ssh user@your-server
-
-# Ir a directorio de instalación
-cd /opt
-```
-
-### Paso 2: Clonar proyecto
-
-```bash
-sudo git clone <repository> jira-qa-agent
-cd jira-qa-agent
-sudo chown -R $USER:$USER .
-```
-
-### Paso 3: Configurar credenciales
-
-```bash
+git clone <repository> qatin
+cd qatin
 cp .env.example .env
-nano .env
-```
+# Completá LLM keys (Jira opcional). CREDENTIALS_SECRET lo puede generar deploy.sh.
 
-Completar:
-- `JIRA_URL` - Tu URL de Jira Cloud
-- `JIRA_EMAIL` - Tu email
-- `JIRA_API_TOKEN` - Token de https://id.atlassian.com/manage-profile/security/api-tokens
-- `OPENAI_API_KEY` - Tu API key de OpenAI
-- `APP_BASE_URL` - URL de tu aplicación a testear
-
-### Paso 4: Deploy
-
-```bash
-chmod +x deploy.sh
+chmod +x deploy.sh scripts/*.sh
+./scripts/pre-deploy-check.sh
 sudo ./deploy.sh
+
+curl http://127.0.0.1:8545/health
+npx pm2 status
 ```
 
-Esperar 5-10 minutos mientras instala todo.
-
-### Paso 5: Verificar
-
-```bash
-curl http://localhost:8545/health
-```
-
-Deberías ver: `{"status":"ok",...}`
-
-### Paso 6: Probar
-
-```bash
-curl -X POST http://localhost:8545/api/test-ticket \
-  -H "Content-Type: application/json" \
-  -d '{"ticketId": "TU-TICKET-123"}'
-```
-
-¡Listo! El agente comenzará a testear.
+Detalle: [DEPLOY_INSTRUCTIONS.md](./DEPLOY_INSTRUCTIONS.md).
 
 ---
 

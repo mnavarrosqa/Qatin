@@ -1,13 +1,17 @@
 import winston from 'winston';
 import path from 'path';
+import fs from 'fs';
+import { LOGS_DIR } from '../paths';
 
 const logLevel = process.env.LOG_LEVEL || 'info';
+
+fs.mkdirSync(LOGS_DIR, { recursive: true });
 
 const logger = winston.createLogger({
   level: logLevel,
   format: winston.format.combine(
     winston.format.timestamp({
-      format: 'YYYY-MM-DD HH:mm:ss'
+      format: 'YYYY-MM-DD HH:mm:ss',
     }),
     winston.format.errors({ stack: true }),
     winston.format.splat(),
@@ -15,7 +19,6 @@ const logger = winston.createLogger({
   ),
   defaultMeta: { service: 'jira-qa-agent' },
   transports: [
-    // Console transport
     new winston.transports.Console({
       format: winston.format.combine(
         winston.format.colorize(),
@@ -26,18 +29,16 @@ const logger = winston.createLogger({
           }
           return msg;
         })
-      )
+      ),
     }),
-    // File transport for errors
     new winston.transports.File({
-      filename: path.join('logs', 'error.log'),
-      level: 'error'
+      filename: path.join(LOGS_DIR, 'error.log'),
+      level: 'error',
     }),
-    // File transport for all logs
     new winston.transports.File({
-      filename: path.join('logs', 'combined.log')
-    })
-  ]
+      filename: path.join(LOGS_DIR, 'combined.log'),
+    }),
+  ],
 });
 
 export { logger };

@@ -298,9 +298,12 @@ async function main() {
     log(`\n${c.bold}${c.green}Setup listo.${c.reset}`);
     log('Siguiente:');
     log(`  1. Completá credenciales en ${c.cyan}.env${c.reset} o en la UI → Configuración`);
+    log(`     En producción seteá ${c.cyan}CREDENTIALS_SECRET${c.reset} (o usá sudo ./deploy.sh)`);
     log(`  2. ${c.cyan}npm start${c.reset}          # API + UI`);
     log(`  3. ${c.cyan}npm run worker${c.reset}     # ejecutor de tests`);
+    log(`     o ${c.cyan}npm run pm2:start${c.reset}  # server + workers`);
     log(`  4. Abrí http://localhost:${process.env.PORT || 8545}`);
+    log(`  Guía server: ${c.cyan}DEPLOY_INSTRUCTIONS.md${c.reset}`);
     log();
   } finally {
     rl.close();

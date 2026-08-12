@@ -44,12 +44,16 @@ Sistema automatizado de testing QA que lee tickets de Jira (o descripciones pega
 
 ## Instalación
 
+Guía completa para otro server: [DEPLOY_INSTRUCTIONS.md](./DEPLOY_INSTRUCTIONS.md).
+
 ### 1. Clonar
 
 ```bash
 git clone <repository> qatin
 cd qatin
 ```
+
+El path puede ser cualquiera (`/opt/qatin`, `~/Qatin`, etc.). No hace falta `/agent`.
 
 ### 2. Variables de entorno
 
@@ -58,7 +62,7 @@ cp .env.example .env
 ```
 
 ```env
-# Jira (opcional si solo usás paste)
+# Jira (opcional si solo usás paste / UI)
 JIRA_URL=https://your-company.atlassian.net
 JIRA_EMAIL=your-email@company.com
 JIRA_API_TOKEN=your-api-token-here
@@ -72,20 +76,22 @@ ANTHROPIC_API_KEY=
 LLM_BASE_URL=
 LLM_API_KEY=
 
-# Ollama (opcional) — server local o remoto con modelos ya pulled
+# Ollama (opcional)
 # LLM_PROVIDER=ollama
 # LLM_MODEL=llama3.2
 # OLLAMA_BASE_URL=http://192.168.1.10:11434/v1
 
-# Defaults de app (override por proyecto en la UI)
 APP_BASE_URL=https://your-app.com
 TEST_USER_EMAIL=test@example.com
 TEST_USER_PASSWORD=test-password
 
 REDIS_HOST=localhost
 SQLITE_PATH=./data/qatin.db
+SCREENSHOTS_DIR=./screenshots
 CREDENTIALS_SECRET=change-me-in-production
 ```
+
+En producción, `CREDENTIALS_SECRET` es obligatorio (o dejalo vacío y `deploy.sh` lo genera).
 
 ### 3. Setup interactivo (primera vez)
 
@@ -99,7 +105,7 @@ Te va a ofrecer, con explicación de para qué sirve cada cosa:
 - **Playwright / Chromium** — browser para correr tests UI y screenshots
 - Build del servidor MCP de Jira
 - Build de Qatin (API + UI)
-- Plugin **Engram** (opcional)
+- Plugins de runtime (Engram, self-heal, etc.)
 
 Sin preguntas (defaults): `npm run setup -- --yes`  
 Repetir setup: `npm run setup -- --force`
@@ -108,15 +114,25 @@ Si solo hiciste `npm install`, el postinstall te recuerda correr `npm run setup`
 
 ### 4. Correr
 
-```bash
-# API + UI (sirve public/ en PORT)
-npm start
+**Producción en un server (PM2):**
 
-# Worker (otro proceso)
-npm run worker
+```bash
+# Checklist opcional
+./scripts/pre-deploy-check.sh
+
+# Ubuntu: instala Node/Redis/Playwright + PM2
+sudo ./deploy.sh
+
+# O solo PM2 si ya tenés deps:
+npm run pm2:start
 ```
 
-Desarrollo:
+**Desarrollo / dos terminales:**
+
+```bash
+npm start          # API + UI
+npm run worker     # ejecutor
+```
 
 ```bash
 npm run dev          # API
@@ -125,6 +141,13 @@ npm run dev:web      # Vite en :5173 con proxy a :8545
 ```
 
 Abrí la UI en `http://localhost:8545` (o `:5173` en modo dev web).
+
+**Docker:**
+
+```bash
+mkdir -p data logs screenshots
+docker compose up -d --build
+```
 
 ## UI
 
@@ -249,48 +272,41 @@ Ahora cuando un ticket se mueva a "Ready for QA", se ejecutarán tests automáti
 
 ## 🛠️ Gestión de Servicios
 
+Qatin en producción usa **PM2** (`ecosystem.config.cjs`: `qatin-server` + workers).
+
 ### Ver status
 
 ```bash
 ./scripts/check-status.sh
+# o
+npx pm2 status
 ```
 
-### Reiniciar servicios
+### Reiniciar / redeploy
 
 ```bash
 ./scripts/restart-services.sh
+# después de git pull + cambios:
+npm run redeploy
 ```
 
-### Ver logs en tiempo real
+### Ver logs
 
 ```bash
-# Server logs
-journalctl -u jira-qa-server -f
-
-# Worker logs
-journalctl -u jira-qa-worker@1 -f
-
-# Todos los servicios
-journalctl -u "jira-qa-*" -f
+npx pm2 logs
+# archivos también en ./logs/
 ```
 
-### Detener servicios
+### Detener / iniciar
 
 ```bash
-sudo systemctl stop jira-qa-server
-sudo systemctl stop jira-qa-worker@{1..3}
-```
-
-### Iniciar servicios
-
-```bash
-sudo systemctl start jira-qa-server
-sudo systemctl start jira-qa-worker@{1..3}
+npm run pm2:stop
+npm run pm2:start
 ```
 
 ## 📸 Screenshots y Evidencia
 
-Los screenshots se guardan en `/agent/screenshots/` organizados por ticket:
+Los screenshots se guardan en `./screenshots/` (bajo el install root / `APP_ROOT`), organizados por ticket:
 
 ```
 screenshots/
@@ -303,7 +319,7 @@ screenshots/
     └── ...
 ```
 
-Estos screenshots se suben automáticamente a Jira como attachments.
+Estos screenshots se suben automáticamente a Jira como attachments (cuando la fuente es Jira).
 
 ## 🧪 Testing Manual
 
@@ -325,28 +341,26 @@ curl -X POST http://localhost:8545/api/test-ticket \
 
 ### Ajustar workers concurrentes
 
-Editar `/agent/.env`:
+Editar `.env` en el root de la instalación:
 
 ```env
-MAX_CONCURRENT_TESTS=5  # Número de tests simultáneos por worker
+MAX_CONCURRENT_TESTS=5  # tests simultáneos por worker
 ```
 
-Luego reiniciar:
+Luego:
 
 ```bash
-sudo systemctl restart jira-qa-worker@{1..3}
+npm run pm2:reload
+# o
+npx pm2 restart ecosystem.config.cjs --update-env
 ```
 
 ### Añadir más workers
 
-```bash
-# Crear worker 4
-sudo cp /etc/systemd/system/jira-qa-worker@1.service \
-        /etc/systemd/system/jira-qa-worker@4.service
+En `ecosystem.config.cjs`, subir `instances` del app `qatin-worker`, luego:
 
-sudo systemctl daemon-reload
-sudo systemctl enable jira-qa-worker@4
-sudo systemctl start jira-qa-worker@4
+```bash
+npm run pm2:reload
 ```
 
 ### Configurar timeout de tests
@@ -379,8 +393,9 @@ sudo systemctl restart redis-server
 ### Playwright browsers no instalados
 
 ```bash
-cd /agent
-npx playwright install chromium --with-deps
+npx playwright install chromium
+# en Linux, también:
+sudo npx playwright install-deps chromium
 ```
 
 ### Jira API errors (401/403)
@@ -392,11 +407,8 @@ Verificar credenciales en `.env`:
 ### Worker se queda stuck
 
 ```bash
-# Ver logs
-journalctl -u jira-qa-worker@1 -n 50
-
-# Reiniciar worker específico
-sudo systemctl restart jira-qa-worker@1
+npx pm2 logs qatin-worker --lines 50
+npx pm2 restart qatin-worker
 ```
 
 ### Limpiar queue de Redis
@@ -426,14 +438,14 @@ htop
 
 # Disco (screenshots pueden crecer)
 df -h
-du -sh /agent/screenshots/
+du -sh ./screenshots/
 ```
 
 ### Limpiar screenshots antiguos
 
 ```bash
 # Eliminar screenshots > 30 días
-find /agent/screenshots/ -type f -mtime +30 -delete
+find ./screenshots/ -type f -mtime +30 -delete
 ```
 
 ## 🔒 Seguridad
@@ -490,16 +502,12 @@ Editar `src/clients/jira-client.ts` - función `postTestResults()`
 
 ## 📝 Logs
 
-Los logs se guardan en:
+Los logs viven bajo el install root:
 
-- `/agent/logs/server.log` - Server logs
-- `/agent/logs/worker-1.log` - Worker 1 logs
-- `/agent/logs/worker-2.log` - Worker 2 logs
-- `/agent/logs/worker-3.log` - Worker 3 logs
-- `/agent/logs/error.log` - Todos los errors
-- `/agent/logs/combined.log` - Todos los logs
+- `./logs/combined.log` / `./logs/error.log` (Winston)
+- `./logs/pm2-server-*.log` / `./logs/pm2-worker-*.log` (PM2)
 
-Rotación automática configurada (14 días).
+También: `npx pm2 logs`. Logrotate diario (14 días) lo configura `deploy.sh` en Ubuntu.
 
 ## 🤝 Contribuir
 

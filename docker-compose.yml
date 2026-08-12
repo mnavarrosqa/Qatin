@@ -1,12 +1,9 @@
-# Docker Compose configuration (alternative to systemd)
-# For development or containerized deployments
-
-version: '3.8'
+# Docker Compose — containerized deploy (alternative to PM2 on the host)
 
 services:
   redis:
     image: redis:7-alpine
-    container_name: jira-qa-redis
+    container_name: qatin-redis
     ports:
       - "6379:6379"
     volumes:
@@ -20,43 +17,56 @@ services:
 
   server:
     build: .
-    container_name: jira-qa-server
+    container_name: qatin-server
     command: npm start
     ports:
-      - "8545:8545"
+      - "${PORT:-8545}:8545"
     environment:
-      - NODE_ENV=production
-      - PORT=8545
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      NODE_ENV: production
+      PORT: 8545
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      APP_ROOT: /app
+      SQLITE_PATH: /app/data/qatin.db
+      SCREENSHOTS_DIR: /app/screenshots
     env_file:
       - .env
     volumes:
-      - ./logs:/agent/logs
-      - ./screenshots:/agent/screenshots
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8545/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
   worker:
     build: .
     command: npm run worker
     environment:
-      - NODE_ENV=production
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      NODE_ENV: production
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      APP_ROOT: /app
+      SQLITE_PATH: /app/data/qatin.db
+      SCREENSHOTS_DIR: /app/screenshots
     env_file:
       - .env
     volumes:
-      - ./logs:/agent/logs
-      - ./screenshots:/agent/screenshots
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./screenshots:/app/screenshots
     depends_on:
       redis:
         condition: service_healthy
     restart: unless-stopped
-    deploy:
-      replicas: 3
+    # Scale: docker compose up -d --scale worker=3
 
 volumes:
   redis-data:
