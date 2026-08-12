@@ -2,6 +2,7 @@ import {
   createLlmClient,
   resolveLlmConfig,
   AgentMessage,
+  AgentChatResponse,
   LlmProvider,
   PromptTier,
   getPromptTier,
@@ -23,7 +24,6 @@ import { QA_CHAT_TOOLS, QaChatToolRunner, ToolEventEmitter } from './qa-chat-too
 import { logger } from '../utils/logger';
 
 const MAX_ITERATIONS = 8;
-const AGENT_LLM_TIMEOUT_MS = 90_000;
 
 export type ChatAgentEvent =
   | { type: 'token'; text: string }
@@ -69,7 +69,7 @@ Rules:
 - Use list_recent_runs to give context on what was already tested.
 - Use lists, keep responses short. If the ticket is ambiguous, ask before generating cases.
 - Format scenarios as \`### Short title\` or \`1. **Title**\` plus bullets of what will be tested. Do not repeat “En este escenario, se probará:”. Keep numbered lists contiguous (1, 2, 3…); never restart at 1. Put detail in the bullets, not in long paragraphs.
-- If user asks for Xray export/import: output a complete CSV (Summary, Description, Test Type, Step, Data, Expected Result) ready to download/import. Do not invent ticket facts — use fetch_ticket / analyze_ticket / list_test_cases first.`;
+- If user asks for Xray export/import: put the full CSV in a \`\`\`csv fenced block (columns: Summary, Description, Test Type, Step, Data, Expected Result), ready to download/import. A short intro is ok; never dump CSV as plain chat text. Do not invent ticket facts — use fetch_ticket / analyze_ticket / list_test_cases first.`;
 
 const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, save_test_cases, enqueue_run, get_run_status, list_projects, set_active_project, list_test_cases, list_recent_runs.
 
@@ -78,7 +78,7 @@ Rules:
 - If config is missing: say what and where to fix it.
 - Include screenshot URLs (/screenshots/...) when available.
 - Pasted text (not a key): use fetch_ticket with pasted_summary + pasted_description.
-- Xray export: full CSV (Summary, Description, Test Type, Step, Data, Expected Result).
+- Xray export: full CSV in a \`\`\`csv fence (Summary, Description, Test Type, Step, Data, Expected Result). Never as plain text.
 - Keep responses short, use lists.
 - Scenarios: \`### Title\` or \`1. **Title**\` + bullets. No repeated “En este escenario…”. Number 1, 2, 3… without restarting.`;
 
@@ -164,7 +164,7 @@ function friendlyLlmError(error: unknown): string {
     (error as any)?.message ||
     'Falló el agente de chat. Revisá el LLM y reintentá.';
   if (/timed out|timeout|AbortError/i.test(raw)) {
-    return 'El modelo tardó demasiado en responder (timeout). En Configuración probá hermes3:latest, o desactivá el “thinking” si usás qwen3.x.';
+    return 'El modelo tardó demasiado en responder. Detené y reintentá, o probá un modelo más rápido en Configuración.';
   }
   if (/model .* not found|404/i.test(raw)) {
     return `El modelo configurado no está en Ollama (${raw}). En Configuración elegí uno instalado (ej. hermes3:latest) o corré \`ollama pull <modelo>\`.`;
@@ -293,7 +293,7 @@ export async function runQaChatTurn(opts: {
   try {
     const config = resolveLlmConfig(llmPartial);
     tier = getPromptTier(config.provider, config.model);
-    client = createLlmClient(config, { timeoutMs: AGENT_LLM_TIMEOUT_MS });
+    client = createLlmClient(config);
   } catch (error: any) {
     const msg =
       error?.message ||
@@ -374,12 +374,44 @@ export async function runQaChatTurn(opts: {
       throwIfAborted(signal);
 
       const started = Date.now();
-      const response = await client.agentChat({
-        messages,
-        tools: QA_CHAT_TOOLS,
-        temperature: 0.3,
-        signal,
-      });
+      let streamed = '';
+      let tokenEst = 0;
+      let lastProgress = 0;
+      const emitGenerating = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastProgress < 200) return;
+        lastProgress = now;
+        const sec = Math.max(1, Math.round((now - started) / 1000));
+        const detail =
+          tokenEst > 0
+            ? `Generando… ${tokenEst} tokens · ${sec}s`
+            : `Consultando al modelo… ${sec}s`;
+        onEvent({ type: 'progress', detail });
+      };
+      emitGenerating(true);
+      const waitTick = setInterval(() => emitGenerating(), 1000);
+
+      let response: AgentChatResponse;
+      try {
+        response = await client.agentChat({
+          messages,
+          tools: QA_CHAT_TOOLS,
+          temperature: 0.3,
+          signal,
+          onToken: (delta) => {
+            tokenEst += delta
+              ? Math.max(1, Math.round(delta.length / 4))
+              : 1;
+            if (delta) {
+              streamed += delta;
+              onEvent({ type: 'token', text: streamed });
+            }
+            emitGenerating();
+          },
+        });
+      } finally {
+        clearInterval(waitTick);
+      }
       llmMs += Date.now() - started;
       usageAcc = addUsage(usageAcc, response.usage);
 

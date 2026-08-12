@@ -6,16 +6,17 @@ import {
   type PluginId,
   type LlmProvider,
 } from '../api';
+import { Icon, type IconName } from '../components/Icon';
 
 type SettingsTab = 'model' | 'keys' | 'jira' | 'agents' | 'plugins';
 type PluginBusyAction = 'install' | 'uninstall' | 'config';
 
-const TABS: { id: SettingsTab; label: string }[] = [
-  { id: 'model', label: 'Modelo' },
-  { id: 'keys', label: 'Claves API' },
-  { id: 'jira', label: 'Jira' },
-  { id: 'agents', label: 'Agentes' },
-  { id: 'plugins', label: 'Plugins' },
+const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
+  { id: 'model', label: 'Modelo', icon: 'cpu' },
+  { id: 'keys', label: 'Claves API', icon: 'key' },
+  { id: 'jira', label: 'Jira', icon: 'ticket' },
+  { id: 'agents', label: 'Agentes', icon: 'bot' },
+  { id: 'plugins', label: 'Plugins', icon: 'plugin' },
 ];
 
 function apiKeyFieldForProvider(provider: string): string | null {
@@ -337,6 +338,7 @@ export function SettingsPage() {
               setTestMsg(null);
             }}
           >
+            <Icon name={item.icon} size={14} />
             {item.label}
           </button>
         ))}

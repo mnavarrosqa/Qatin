@@ -22,6 +22,7 @@ import {
   TicketAnalyzer,
   createSyntheticTicket,
   TestStrategy,
+  type AnalyzeOptions,
 } from './ticket-analyzer';
 import { isInstalled } from '../plugins';
 import { LlmProvider, ToolDefinition } from '../llm';
@@ -500,8 +501,31 @@ export class QaChatToolRunner {
           })
         : await (await getJiraClient()).getIssue(ticket.key);
 
-    const analyzeOptions = {
-      memoryContext: undefined as string | undefined,
+    const analyzeOptions: AnalyzeOptions = {
+      signal: this.signal,
+    };
+
+    const started = Date.now();
+    let lastTokens = 0;
+    let lastProg = 0;
+    const emitAnalyzeProgress = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastProg < 200) return;
+      lastProg = now;
+      const sec = Math.max(1, Math.round((now - started) / 1000));
+      const detail =
+        lastTokens > 0
+          ? `Analizando ticket · ${lastTokens} tokens · ${sec}s`
+          : `Analizando ticket · ${sec}s`;
+      this.emit?.({
+        type: 'progress',
+        tool: 'analyze_ticket',
+        detail,
+      });
+    };
+    analyzeOptions.onProgress = (tokens) => {
+      lastTokens = tokens;
+      emitAnalyzeProgress();
     };
 
     if (isInstalled('engram')) {
@@ -522,6 +546,7 @@ export class QaChatToolRunner {
 
     let strategy: TestStrategy;
     let usedFallback = false;
+    const tick = setInterval(() => emitAnalyzeProgress(true), 1000);
     try {
       strategy = await analyzer.analyzeTicket(analyzable as any, analyzeOptions);
     } catch (error) {
@@ -531,6 +556,8 @@ export class QaChatToolRunner {
         analyzeOptions
       );
       usedFallback = true;
+    } finally {
+      clearInterval(tick);
     }
 
     return {

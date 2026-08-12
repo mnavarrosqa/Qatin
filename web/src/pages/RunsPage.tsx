@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
 import { api, type TestRun } from '../api';
+import { Icon, type IconName } from '../components/Icon';
+
+function badgeIcon(status: string): IconName {
+  if (status === 'completed') return 'check';
+  if (status === 'failed') return 'error';
+  return 'warning';
+}
 
 function badgeClass(status: string) {
   if (status === 'completed') return 'ok';
@@ -70,6 +77,7 @@ export function RunsPage() {
                 </div>
                 <div className="actions">
                   <span className={`badge ${badgeClass(run.status)}`}>
+                    <Icon name={badgeIcon(run.status)} size={12} />
                     {statusLabel(run.status)}
                   </span>
                   <button

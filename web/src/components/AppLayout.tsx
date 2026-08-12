@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { ChatPage } from '../pages/ChatPage';
+import { Icon } from './Icon';
 
 export function AppLayout() {
   const { pathname } = useLocation();
@@ -13,11 +14,21 @@ export function AppLayout() {
           <p className="brand-sub">QA para tickets</p>
           <nav className="nav">
             <NavLink to="/" end>
+              <Icon name="chat" />
               Chat
             </NavLink>
-            <NavLink to="/projects">Proyectos</NavLink>
-            <NavLink to="/runs">Ejecuciones</NavLink>
-            <NavLink to="/settings">Configuración</NavLink>
+            <NavLink to="/projects">
+              <Icon name="folder" />
+              Proyectos
+            </NavLink>
+            <NavLink to="/runs">
+              <Icon name="runs" />
+              Ejecuciones
+            </NavLink>
+            <NavLink to="/settings">
+              <Icon name="gear" />
+              Configuración
+            </NavLink>
           </nav>
         </div>
         <div

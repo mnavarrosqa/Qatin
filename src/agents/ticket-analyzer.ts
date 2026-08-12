@@ -59,6 +59,8 @@ export interface TestStrategy {
 
 export interface AnalyzeOptions {
   memoryContext?: string;
+  signal?: AbortSignal;
+  onProgress?: (tokens: number) => void;
 }
 
 export interface TestScenario {
@@ -157,11 +159,21 @@ export class TicketAnalyzer {
       );
 
       const client = createLlmClient(this.llmConfig);
+      let tokenEst = 0;
       const response = await client.chatCompletion({
         system: this.buildSystemPrompt(),
         user: prompt,
         json: true,
         temperature: 0.45,
+        signal: options?.signal,
+        onToken: options?.onProgress
+          ? (delta) => {
+              tokenEst += delta
+                ? Math.max(1, Math.round(delta.length / 4))
+                : 1;
+              options.onProgress!(tokenEst);
+            }
+          : undefined,
       });
 
       let strategy = JSON.parse(response.content) as TestStrategy;

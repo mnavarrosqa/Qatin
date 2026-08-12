@@ -1,8 +1,10 @@
 import type { ReactNode } from 'react';
+import { Icon } from './components/Icon';
 
 const OL_RE = /^(\d+)[.)]\s+(.*)$/;
 const UL_RE = /^[-*•]\s+(.*)$/;
 const HEADING_RE = /^(#{2,3})\s+(.*)$/;
+const CSV_HEADER_RE = /^summary\s*,\s*description\b/i;
 
 type ListItem = {
   text: string;
@@ -10,12 +12,19 @@ type ListItem = {
   children?: string[];
 };
 
+type CsvBlock = {
+  type: 'csv';
+  headers: string[];
+  rows: string[][];
+};
+
 type ContentBlock =
   | { type: 'heading'; level: 2 | 3; text: string }
   | { type: 'para'; text: string }
   | { type: 'ul'; items: ListItem[] }
   | { type: 'ol'; items: ListItem[]; start?: number }
-  | { type: 'code'; text: string };
+  | { type: 'code'; text: string }
+  | CsvBlock;
 
 type OpenList = {
   type: 'ol' | 'ul';
@@ -157,21 +166,232 @@ function parseLines(chunk: string): ContentBlock[] {
   return blocks;
 }
 
-function parseBlocks(text: string): ContentBlock[] {
-  const blocks: ContentBlock[] = [];
-  const fenceSplit = text.split(/(```[\s\S]*?```)/g);
+function isCsvHeader(line: string): boolean {
+  return CSV_HEADER_RE.test(line.trim());
+}
 
-  for (const chunk of fenceSplit) {
-    if (!chunk) continue;
-    if (chunk.startsWith('```') && chunk.endsWith('```')) {
-      const inner = chunk.slice(3, -3).replace(/^\w*\n?/, '');
-      blocks.push({ type: 'code', text: inner.replace(/\n$/, '') });
+function looksLikeCsv(lang: string, text: string): boolean {
+  if (lang === 'csv' || lang === 'tsv') return true;
+  const first = text.trim().split('\n').find((line) => line.trim());
+  return Boolean(first && isCsvHeader(first));
+}
+
+function parseCsv(input: string): { rows: string[][]; complete: boolean } {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  let i = 0;
+
+  const pushRow = () => {
+    if (row.some((cell) => cell.trim())) rows.push(row);
+    row = [];
+  };
+
+  while (i < input.length) {
+    const c = input[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (input[i + 1] === '"') {
+          field += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i += 1;
+        continue;
+      }
+      field += c;
+      i += 1;
       continue;
     }
-    blocks.push(...parseLines(chunk));
+    if (c === '"') {
+      inQuotes = true;
+      i += 1;
+      continue;
+    }
+    if (c === ',') {
+      row.push(field);
+      field = '';
+      i += 1;
+      continue;
+    }
+    if (c === '\n' || c === '\r') {
+      if (c === '\r' && input[i + 1] === '\n') i += 1;
+      row.push(field);
+      field = '';
+      pushRow();
+      i += 1;
+      continue;
+    }
+    field += c;
+    i += 1;
+  }
+
+  if (!inQuotes && (field.length > 0 || row.length > 0)) {
+    row.push(field);
+    pushRow();
+  }
+
+  return { rows, complete: !inQuotes };
+}
+
+function csvBlockFromText(text: string): CsvBlock {
+  const { rows } = parseCsv(text);
+  if (!rows.length) {
+    return { type: 'csv', headers: [], rows: [] };
+  }
+  return {
+    type: 'csv',
+    headers: rows[0],
+    rows: rows.slice(1),
+  };
+}
+
+function splitUnfencedCsv(chunk: string): ContentBlock[] {
+  const lines = chunk.split('\n');
+  const headerIdx = lines.findIndex((line) => isCsvHeader(line));
+  if (headerIdx < 0) return parseLines(chunk);
+
+  const before = lines.slice(0, headerIdx).join('\n');
+  const csvText = lines.slice(headerIdx).join('\n');
+  const blocks: ContentBlock[] = [];
+  if (before.trim()) blocks.push(...parseLines(before));
+  blocks.push(csvBlockFromText(csvText));
+  return blocks;
+}
+
+function parseBlocks(text: string): ContentBlock[] {
+  const blocks: ContentBlock[] = [];
+  let i = 0;
+
+  while (i < text.length) {
+    const start = text.indexOf('```', i);
+    if (start < 0) {
+      const rest = text.slice(i);
+      if (rest) blocks.push(...splitUnfencedCsv(rest));
+      break;
+    }
+    if (start > i) {
+      blocks.push(...splitUnfencedCsv(text.slice(i, start)));
+    }
+
+    const afterOpen = start + 3;
+    const nl = text.indexOf('\n', afterOpen);
+    const langEnd = nl < 0 ? text.length : nl;
+    const lang = text.slice(afterOpen, langEnd).trim().toLowerCase();
+    const bodyStart = nl < 0 ? text.length : nl + 1;
+    const close = text.indexOf('```', bodyStart);
+    const closed = close >= 0;
+    const inner = (closed ? text.slice(bodyStart, close) : text.slice(bodyStart))
+      .replace(/\n$/, '');
+
+    if (looksLikeCsv(lang, inner)) {
+      blocks.push(csvBlockFromText(inner));
+    } else {
+      blocks.push({ type: 'code', text: inner });
+    }
+
+    if (!closed) break;
+    i = close + 3;
+    if (text[i] === '\n') i += 1;
   }
 
   return blocks;
+}
+
+function serializeCsv(headers: string[], rows: string[][]): string {
+  const esc = (cell: string) => {
+    if (/[",\n\r]/.test(cell)) return `"${cell.replace(/"/g, '""')}"`;
+    return cell;
+  };
+  return [headers, ...rows].map((row) => row.map(esc).join(',')).join('\n');
+}
+
+function downloadCsv(headers: string[], rows: string[][]) {
+  const blob = new Blob([serializeCsv(headers, rows) + '\n'], {
+    type: 'text/csv;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'casos-xray.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function CsvTable({
+  block,
+  streaming,
+}: {
+  block: CsvBlock;
+  streaming: boolean;
+}) {
+  const generating = streaming;
+  const ready = !streaming && block.headers.length > 0 && block.rows.length > 0;
+
+  return (
+    <div className="chat-csv">
+      <div className="chat-csv-bar">
+        <div className="chat-csv-meta">
+          <span className="chat-csv-title">CSV para Xray</span>
+          {block.rows.length > 0 ? (
+            <span className="chat-csv-count">
+              {block.rows.length} {block.rows.length === 1 ? 'fila' : 'filas'}
+            </span>
+          ) : generating ? (
+            <span className="chat-csv-count">Generando…</span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="btn btn-ghost btn-compact"
+          onClick={() => downloadCsv(block.headers, block.rows)}
+          disabled={!ready}
+        >
+          <Icon name="download" size={14} />
+          Descargar
+        </button>
+      </div>
+      {block.headers.length > 0 ? (
+        <div className="chat-csv-scroll">
+          <table aria-label="Casos en CSV para Xray">
+            <thead>
+              <tr>
+                {block.headers.map((h, i) => (
+                  <th key={`${i}-${h}`}>{h.trim() || `Col ${i + 1}`}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {block.rows.map((row, ri) => (
+                <tr key={ri}>
+                  {block.headers.map((_, ci) => (
+                    <td key={ci} title={row[ci] || ''}>
+                      {row[ci] || ''}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="chat-csv-empty">
+          {generating ? (
+            <span className="chat-stream-caret" aria-hidden />
+          ) : null}
+          Armando el archivo…
+        </p>
+      )}
+      {generating && block.headers.length > 0 ? (
+        <p className="chat-csv-status">
+          <span className="chat-stream-caret" aria-hidden />
+          Generando filas…
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 function ListItemView({
@@ -223,6 +443,8 @@ export function MessageBody({
     .trim();
 
   const blocks = cleaned ? parseBlocks(cleaned) : [];
+  const last = blocks[blocks.length - 1];
+  const caretAfterText = streaming && last?.type !== 'csv';
 
   return (
     <div className="chat-content">
@@ -234,6 +456,15 @@ export function MessageBody({
             <Tag key={key} className={`chat-heading chat-heading-${block.level}`}>
               {renderInline(block.text, key)}
             </Tag>
+          );
+        }
+        if (block.type === 'csv') {
+          return (
+            <CsvTable
+              key={key}
+              block={block}
+              streaming={streaming && bi === blocks.length - 1}
+            />
           );
         }
         if (block.type === 'code') {
@@ -286,7 +517,7 @@ export function MessageBody({
           </p>
         );
       })}
-      {streaming && <span className="chat-stream-caret" aria-hidden />}
+      {caretAfterText && <span className="chat-stream-caret" aria-hidden />}
       {shots.length > 0 && (
         <div className="chat-shots">
           <p className="chat-shots-label">Evidencias</p>

@@ -195,7 +195,6 @@ export async function startChatGeneration(opts: {
           updateAssistant(assistantId, (m) => ({
             ...m,
             content: ev.text,
-            tools: settleTools(m.tools, { dropProgress: true }),
           }));
         } else if (ev.type === 'tool_start') {
           updateAssistant(assistantId, (m) => ({

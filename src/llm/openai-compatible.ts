@@ -9,6 +9,10 @@ import {
   LlmUsage,
   ToolCall,
 } from './types';
+import { logger } from '../utils/logger';
+
+/** Safety cap so a hung Ollama does not block forever. User can still Stop. */
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
 function usageFromOpenAi(
   usage?: {
@@ -25,7 +29,6 @@ function usageFromOpenAi(
   if (totalTokens <= 0) return undefined;
   return { promptTokens, completionTokens, totalTokens };
 }
-import { logger } from '../utils/logger';
 
 function toOpenAiMessages(
   messages: AgentMessage[]
@@ -62,6 +65,39 @@ function toOpenAiMessages(
   });
 }
 
+type ToolAcc = { id: string; name: string; arguments: string };
+
+function applyToolDelta(
+  acc: Map<number, ToolAcc>,
+  deltas: OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta['tool_calls']
+) {
+  if (!deltas?.length) return;
+  for (const tc of deltas) {
+    const idx = tc.index ?? 0;
+    const cur = acc.get(idx) || { id: '', name: '', arguments: '' };
+    if (tc.id) cur.id = tc.id;
+    if (tc.function?.name) cur.name += tc.function.name;
+    if (tc.function?.arguments) cur.arguments += tc.function.arguments;
+    acc.set(idx, cur);
+  }
+}
+
+function toolCallsFromAcc(acc: Map<number, ToolAcc>): ToolCall[] | undefined {
+  if (!acc.size) return undefined;
+  const toolCalls: ToolCall[] = [...acc.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, tc]) => ({
+      id: tc.id || `call_${tc.name}`,
+      type: 'function' as const,
+      function: {
+        name: tc.name,
+        arguments: tc.arguments || '{}',
+      },
+    }))
+    .filter((tc) => tc.function.name);
+  return toolCalls.length ? toolCalls : undefined;
+}
+
 export class OpenAICompatibleClient implements LlmProviderClient {
   private client: OpenAI;
   private model: string;
@@ -75,7 +111,7 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     baseUrl?: string;
     /** Some servers (e.g. older Ollama) reject response_format */
     supportsJsonFormat?: boolean;
-    /** Request timeout in ms (OpenAI SDK default is long; tests need a short one) */
+    /** Request timeout in ms (OpenAI SDK default is 10 min) */
     timeoutMs?: number;
     /** Pass `think: false` for Ollama reasoning models (qwen3, etc.) */
     disableThinking?: boolean;
@@ -86,7 +122,8 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     this.client = new OpenAI({
       apiKey: opts.apiKey,
       ...(opts.baseUrl ? { baseURL: opts.baseUrl } : {}),
-      ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+      timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      maxRetries: 0,
     });
     logger.info('OpenAI-compatible LLM client ready', {
       model: opts.model,
@@ -99,22 +136,59 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     return this.disableThinking ? { think: false } : {};
   }
 
+  private reqOpts(signal?: AbortSignal) {
+    return signal ? { signal } : undefined;
+  }
+
   async chatCompletion(
     request: ChatCompletionRequest
   ): Promise<ChatCompletionResponse> {
     const useJsonFormat = Boolean(request.json && this.supportsJsonFormat);
-    const response = await this.client.chat.completions.create({
+    const params = {
       model: this.model,
       messages: [
-        { role: 'system', content: request.system },
-        { role: 'user', content: request.user },
+        { role: 'system' as const, content: request.system },
+        { role: 'user' as const, content: request.user },
       ],
       temperature: request.temperature ?? 0.3,
       ...(useJsonFormat
         ? { response_format: { type: 'json_object' as const } }
         : {}),
       ...this.ollamaExtras(),
-    } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming);
+    };
+
+    if (request.onToken) {
+      const stream = await this.client.chat.completions.create(
+        { ...params, stream: true } as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
+        this.reqOpts(request.signal)
+      );
+      let content = '';
+      let reasoning = '';
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta as
+          | (OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta & {
+              reasoning?: string;
+            })
+          | undefined;
+        if (delta?.content) {
+          content += delta.content;
+          request.onToken(delta.content);
+        } else if (delta?.reasoning) {
+          reasoning += delta.reasoning;
+          request.onToken('');
+        }
+      }
+      const text = content.trim() || reasoning.trim();
+      if (!text) {
+        throw new Error('Respuesta vacía del proveedor compatible con OpenAI');
+      }
+      return { content: text };
+    }
+
+    const response = await this.client.chat.completions.create(
+      params as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
+      this.reqOpts(request.signal)
+    );
 
     const message = response.choices[0]?.message as
       | (OpenAI.Chat.ChatCompletionMessage & { reasoning?: string })
@@ -131,6 +205,84 @@ export class OpenAICompatibleClient implements LlmProviderClient {
   }
 
   async agentChat(request: AgentChatRequest): Promise<AgentChatResponse> {
+    try {
+      const streamed = await this.agentChatStream(request);
+      if (streamed.content || streamed.tool_calls?.length) return streamed;
+    } catch (error) {
+      if (request.signal?.aborted) throw error;
+      logger.warn('Streaming agentChat failed, retrying without stream', error);
+    }
+    return this.agentChatOnce(request);
+  }
+
+  private async agentChatStream(
+    request: AgentChatRequest
+  ): Promise<AgentChatResponse> {
+    const tools =
+      request.tools?.map((tool) => ({
+        type: 'function' as const,
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        },
+      })) || undefined;
+
+    const stream = await this.client.chat.completions.create(
+      {
+        model: this.model,
+        messages: toOpenAiMessages(request.messages),
+        temperature: request.temperature ?? 0.3,
+        ...(tools?.length ? { tools } : {}),
+        ...this.ollamaExtras(),
+        stream: true,
+      } as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
+      this.reqOpts(request.signal)
+    );
+
+    let content = '';
+    let reasoning = '';
+    const toolAcc = new Map<number, ToolAcc>();
+    let usage: LlmUsage | undefined;
+
+    for await (const chunk of stream) {
+      if (chunk.usage) usage = usageFromOpenAi(chunk.usage);
+      const delta = chunk.choices[0]?.delta as
+        | (OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta & {
+            reasoning?: string;
+          })
+        | undefined;
+      if (!delta) continue;
+
+      if (delta.content) {
+        content += delta.content;
+        request.onToken?.(delta.content);
+      } else if (delta.reasoning) {
+        reasoning += delta.reasoning;
+        request.onToken?.('');
+      }
+
+      if (delta.tool_calls?.length) {
+        applyToolDelta(toolAcc, delta.tool_calls);
+        request.onToken?.('');
+      }
+    }
+
+    const toolCalls = toolCallsFromAcc(toolAcc);
+    const text =
+      content.trim() ||
+      (!toolCalls?.length ? reasoning.trim() || null : null);
+
+    return {
+      content: text,
+      ...(toolCalls ? { tool_calls: toolCalls } : {}),
+      ...(usage ? { usage } : {}),
+    };
+  }
+
+  private async agentChatOnce(
+    request: AgentChatRequest
+  ): Promise<AgentChatResponse> {
     const tools =
       request.tools?.map((tool) => ({
         type: 'function' as const,
@@ -149,7 +301,7 @@ export class OpenAICompatibleClient implements LlmProviderClient {
         ...(tools?.length ? { tools } : {}),
         ...this.ollamaExtras(),
       } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
-      request.signal ? { signal: request.signal } : undefined
+      this.reqOpts(request.signal)
     );
 
     const message = response.choices[0]?.message as

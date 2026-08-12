@@ -7,6 +7,7 @@ import {
   type ProviderInfo,
   type LlmProvider,
 } from '../api';
+import { Icon } from '../components/Icon';
 
 const emptyForm: ProjectInput = {
   name: '',
@@ -368,6 +369,7 @@ export function ProjectsPage() {
                 </div>
                 <div className="actions">
                   <Link className="btn btn-ghost btn-compact" to="/">
+                    <Icon name="chat" size={14} />
                     Chat
                   </Link>
                   <button
@@ -375,6 +377,7 @@ export function ProjectsPage() {
                     type="button"
                     onClick={() => startEdit(project)}
                   >
+                    <Icon name="pencil" size={14} />
                     Editar
                   </button>
                   <button
@@ -382,6 +385,7 @@ export function ProjectsPage() {
                     type="button"
                     onClick={() => remove(project.id)}
                   >
+                    <Icon name="trash" size={14} />
                     Eliminar
                   </button>
                 </div>

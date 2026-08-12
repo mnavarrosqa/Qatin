@@ -17,6 +17,9 @@ export interface ChatCompletionRequest {
   user: string;
   json?: boolean;
   temperature?: number;
+  signal?: AbortSignal;
+  /** Content deltas while streaming. Empty string = activity without visible text. */
+  onToken?: (delta: string) => void;
 }
 
 export interface ChatCompletionResponse {
@@ -54,6 +57,8 @@ export interface AgentChatRequest {
   temperature?: number;
   /** Cancel in-flight provider call when the client disconnects / user stops. */
   signal?: AbortSignal;
+  /** Content deltas while streaming. Empty string = activity without visible text. */
+  onToken?: (delta: string) => void;
 }
 
 export interface LlmUsage {

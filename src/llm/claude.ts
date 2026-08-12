@@ -111,20 +111,32 @@ export class ClaudeClient implements LlmProviderClient {
       ? `${request.system}\n\nRespond with valid JSON only, no markdown fences.`
       : request.system;
 
-    const response = await this.client.messages.create({
+    const createOpts = request.signal ? { signal: request.signal } : undefined;
+    const params = {
       model: this.model,
       max_tokens: 4096,
       temperature: request.temperature ?? 0.3,
       system,
-      messages: [{ role: 'user', content: request.user }],
-    });
+      messages: [{ role: 'user' as const, content: request.user }],
+    };
 
-    const block = response.content.find((b) => b.type === 'text');
-    if (!block || block.type !== 'text' || !block.text) {
+    let content: string;
+    if (request.onToken) {
+      const stream = this.client.messages.stream(params, createOpts);
+      stream.on('text', (text) => request.onToken?.(text));
+      const response = await stream.finalMessage();
+      const block = response.content.find((b) => b.type === 'text');
+      content = block && block.type === 'text' ? block.text.trim() : '';
+    } else {
+      const response = await this.client.messages.create(params, createOpts);
+      const block = response.content.find((b) => b.type === 'text');
+      content = block && block.type === 'text' ? block.text.trim() : '';
+    }
+
+    if (!content) {
       throw new Error('Respuesta vacía de Claude');
     }
 
-    let content = block.text.trim();
     if (request.json) {
       const fenced = content.match(/```(?:json)?\s*([\s\S]*?)```/);
       if (fenced) {
@@ -143,17 +155,24 @@ export class ClaudeClient implements LlmProviderClient {
       input_schema: tool.parameters as Anthropic.Tool.InputSchema,
     }));
 
-    const response = await this.client.messages.create(
-      {
-        model: this.model,
-        max_tokens: 4096,
-        temperature: request.temperature ?? 0.3,
-        ...(system ? { system } : {}),
-        messages: toClaudeMessages(rest),
-        ...(tools?.length ? { tools } : {}),
-      },
-      request.signal ? { signal: request.signal } : undefined
-    );
+    const params = {
+      model: this.model,
+      max_tokens: 4096,
+      temperature: request.temperature ?? 0.3,
+      ...(system ? { system } : {}),
+      messages: toClaudeMessages(rest),
+      ...(tools?.length ? { tools } : {}),
+    };
+    const createOpts = request.signal ? { signal: request.signal } : undefined;
+
+    let response: Anthropic.Message;
+    if (request.onToken) {
+      const stream = this.client.messages.stream(params, createOpts);
+      stream.on('text', (text) => request.onToken?.(text));
+      response = await stream.finalMessage();
+    } else {
+      response = await this.client.messages.create(params, createOpts);
+    }
 
     const textParts: string[] = [];
     const toolCalls: ToolCall[] = [];

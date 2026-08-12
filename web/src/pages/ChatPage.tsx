@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -27,6 +28,7 @@ import {
 } from '../chatGeneration';
 import { getFollowUps } from '../chatFollowUps';
 import { MessageBody } from '../chatMarkdown';
+import { Icon, type IconName } from '../components/Icon';
 
 const PROVIDER_SHORT: Record<LlmProvider, string> = {
   openai: 'OpenAI',
@@ -74,35 +76,59 @@ function resolveChatLlm(
   };
 }
 
-const SUGGESTIONS = [
+const SUGGESTIONS: {
+  label: string;
+  prompt: string;
+  suffix: string;
+  placeholder: string;
+  icon: IconName;
+}[] = [
   {
     label: 'Entender un ticket',
     prompt: '¿Qué entendés del ticket ',
     suffix: '?',
     placeholder: 'ABC-12',
+    icon: 'ticket',
   },
   {
     label: 'Crear casos',
     prompt: 'Creá casos de prueba para ',
     suffix: ' y guardalos',
     placeholder: 'ABC-12',
+    icon: 'list',
   },
   {
     label: 'Probar con evidencias',
     prompt: 'Probá ',
     suffix: ' y dame evidencias',
     placeholder: 'ABC-12',
+    icon: 'camera',
   },
   {
     label: '¿Qué proyectos hay?',
     prompt: '¿Qué proyectos tengo configurados?',
     suffix: '',
     placeholder: '',
+    icon: 'folder',
   },
 ];
 
+type SessionGroupId = 'hoy' | 'ayer' | 'semana' | 'anteriores';
+
+const GROUP_ORDER: SessionGroupId[] = ['hoy', 'ayer', 'semana', 'anteriores'];
+const GROUP_LABELS: Record<SessionGroupId, string> = {
+  hoy: 'Hoy',
+  ayer: 'Ayer',
+  semana: 'Esta semana',
+  anteriores: 'Anteriores',
+};
+
+function parseSessionTime(iso: string): number {
+  return Date.parse(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+}
+
 function relativeTime(iso: string): string {
-  const then = Date.parse(iso.includes('T') ? iso : iso.replace(' ', 'T') + 'Z');
+  const then = parseSessionTime(iso);
   if (Number.isNaN(then)) return iso;
   const diff = Date.now() - then;
   const mins = Math.floor(diff / 60_000);
@@ -118,17 +144,71 @@ function relativeTime(iso: string): string {
   });
 }
 
+function sessionGroup(iso: string): SessionGroupId {
+  const then = parseSessionTime(iso);
+  if (Number.isNaN(then)) return 'anteriores';
+  const now = new Date();
+  const todayStart = new Date(
+    now.getFullYear(),
+    now.getMonth(),
+    now.getDate()
+  ).getTime();
+  const sessionDate = new Date(then);
+  const sessionStart = new Date(
+    sessionDate.getFullYear(),
+    sessionDate.getMonth(),
+    sessionDate.getDate()
+  ).getTime();
+  if (sessionStart >= todayStart) return 'hoy';
+  if (sessionStart >= todayStart - 86_400_000) return 'ayer';
+  const dow = now.getDay();
+  const mondayOffset = dow === 0 ? 6 : dow - 1;
+  const weekStart = todayStart - mondayOffset * 86_400_000;
+  if (sessionStart >= weekStart) return 'semana';
+  return 'anteriores';
+}
+
+function groupSessions(items: ChatSession[]) {
+  const buckets: Record<SessionGroupId, ChatSession[]> = {
+    hoy: [],
+    ayer: [],
+    semana: [],
+    anteriores: [],
+  };
+  for (const s of items) {
+    buckets[sessionGroup(s.updated_at)].push(s);
+  }
+  return GROUP_ORDER.filter((id) => buckets[id].length > 0).map((id) => ({
+    id,
+    label: GROUP_LABELS[id],
+    items: buckets[id],
+  }));
+}
+
 function formatCount(n: number): string {
   return n.toLocaleString('es-AR');
 }
 
+function formatDuration(ms: number): string {
+  const sec = ms / 1000;
+  if (sec < 60) {
+    return `${sec.toLocaleString('es-AR', { maximumFractionDigits: 1 })} s`;
+  }
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}m ${s}s`;
+}
+
 function formatUsageLine(u: ChatUsage): string {
-  const tokens = `${formatCount(u.totalTokens)} tokens`;
-  if (u.tokensPerSecond == null) return tokens;
-  const speed = u.tokensPerSecond.toLocaleString('es-AR', {
-    maximumFractionDigits: 1,
-  });
-  return `${tokens} · ${speed} tok/s`;
+  const parts = [`${formatCount(u.totalTokens)} tokens`];
+  if (u.llmMs > 0) parts.push(formatDuration(u.llmMs));
+  if (u.tokensPerSecond != null) {
+    const speed = u.tokensPerSecond.toLocaleString('es-AR', {
+      maximumFractionDigits: 1,
+    });
+    parts.push(`${speed} tok/s`);
+  }
+  return parts.join(' · ');
 }
 
 function usageTitle(u: ChatUsage): string {
@@ -173,6 +253,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const selectedProjectIdRef = useRef(selectedProjectId);
   selectedProjectIdRef.current = selectedProjectId;
   const [sessionsSlot, setSessionsSlot] = useState<HTMLElement | null>(null);
+  const [query, setQuery] = useState('');
 
   const liveForActive =
     generation && generation.sessionId === activeId ? generation : null;
@@ -518,14 +599,43 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const followUps =
     !viewBusy && !noProjects ? getFollowUps(viewMessages) : [];
 
+  const filteredSessions = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter((s) => s.title.toLowerCase().includes(q));
+  }, [sessions, query]);
+  const groupedSessions = useMemo(
+    () => groupSessions(filteredSessions),
+    [filteredSessions]
+  );
+
   const sessionsPanel = (
     <aside className="chat-sessions" aria-label="Conversaciones">
       <div className="chat-sessions-head">
         <h2>Chats</h2>
-        <button type="button" className="btn btn-compact" onClick={newChat}>
-          Nuevo
+        <button
+          type="button"
+          className="btn btn-icon"
+          onClick={newChat}
+          aria-label="Nuevo chat"
+          title="Nuevo"
+        >
+          <Icon name="plus" size={14} />
         </button>
       </div>
+
+      {sessions.length > 0 ? (
+        <label className="chat-sessions-search">
+          <Icon name="search" size={14} />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar"
+            aria-label="Buscar chats"
+          />
+        </label>
+      ) : null}
 
       {loading ? (
         <div className="chat-skel-list" aria-hidden>
@@ -539,39 +649,48 @@ export function ChatPage({ active = true }: { active?: boolean }) {
             ? 'Todavía no hay conversaciones. Elegí un proyecto o empezá abajo.'
             : 'Todavía no hay conversaciones en este proyecto.'}
         </p>
+      ) : filteredSessions.length === 0 ? (
+        <p className="chat-sessions-empty">Ningún chat coincide.</p>
       ) : (
-        <ul className="chat-session-list">
-          {sessions.map((s) => (
-            <li key={s.id} className="chat-session-row">
-              <button
-                type="button"
-                className={
-                  s.id === activeId
-                    ? 'chat-session-item active'
-                    : 'chat-session-item'
-                }
-                onClick={() => openSession(s.id)}
-              >
-                <span className="chat-session-title">{s.title}</span>
-                <span className="chat-session-meta">
-                  {relativeTime(s.updated_at)}
-                </span>
-              </button>
-              <button
-                type="button"
-                className="chat-session-delete"
-                aria-label={`Eliminar ${s.title}`}
-                title="Eliminar"
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  deleteSession(s.id);
-                }}
-              >
-                ×
-              </button>
-            </li>
+        <div className="chat-session-groups">
+          {groupedSessions.map((g) => (
+            <section key={g.id} className="chat-session-group">
+              <h3>{g.label}</h3>
+              <ul className="chat-session-list">
+                {g.items.map((s) => (
+                  <li key={s.id} className="chat-session-row">
+                    <button
+                      type="button"
+                      className={
+                        s.id === activeId
+                          ? 'chat-session-item active'
+                          : 'chat-session-item'
+                      }
+                      onClick={() => openSession(s.id)}
+                    >
+                      <span className="chat-session-title">{s.title}</span>
+                      <span className="chat-session-meta">
+                        {relativeTime(s.updated_at)}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="chat-session-delete"
+                      aria-label={`Eliminar ${s.title}`}
+                      title="Eliminar"
+                      onClick={(ev) => {
+                        ev.stopPropagation();
+                        deleteSession(s.id);
+                      }}
+                    >
+                      <Icon name="trash" size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
     </aside>
   );
@@ -633,14 +752,18 @@ export function ChatPage({ active = true }: { active?: boolean }) {
 
         {noProjects && (
           <div className="chat-banner warn" role="status">
-            <div>
-              <strong>Falta configurar un proyecto</strong>
-              <p>
-                Sin proyecto no puedo apuntar a una app ni a Jira. Creá uno y
-                volvé.
-              </p>
+            <div className="chat-banner-body">
+              <Icon name="warning" />
+              <div>
+                <strong>Falta configurar un proyecto</strong>
+                <p>
+                  Sin proyecto no puedo apuntar a una app ni a Jira. Creá uno y
+                  volvé.
+                </p>
+              </div>
             </div>
             <Link className="btn btn-compact" to="/projects">
+              <Icon name="folder" size={14} />
               Ir a Proyectos
             </Link>
           </div>
@@ -648,21 +771,27 @@ export function ChatPage({ active = true }: { active?: boolean }) {
 
         {needsProject && (
           <div className="chat-banner" role="status">
-            <div>
-              <strong>Elegí un proyecto</strong>
-              <p>
-                Así sé a qué entorno y tickets apuntar. También podés nombrarlo
-                en el chat.
-              </p>
+            <div className="chat-banner-body">
+              <Icon name="folder" />
+              <div>
+                <strong>Elegí un proyecto</strong>
+                <p>
+                  Así sé a qué entorno y tickets apuntar. También podés nombrarlo
+                  en el chat.
+                </p>
+              </div>
             </div>
           </div>
         )}
 
         {viewError && (
           <div className="chat-banner fail" role="alert">
-            <div>
-              <strong>Algo falló</strong>
-              <p>{viewError}</p>
+            <div className="chat-banner-body">
+              <Icon name="error" />
+              <div>
+                <strong>Algo falló</strong>
+                <p>{viewError}</p>
+              </div>
             </div>
             <button
               type="button"
@@ -692,6 +821,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                     onClick={() => applySuggestion(s)}
                     disabled={noProjects && s.label !== '¿Qué proyectos hay?'}
                   >
+                    <Icon name={s.icon} size={14} />
                     {s.label}
                   </button>
                 ))}
@@ -715,6 +845,20 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               m.kind === 'assistant'
                 ? (m.tools || []).filter((t) => t.tool && t.tool !== 'progress')
                 : [];
+            const runningVisible = visibleTools.filter(
+              (t) => t.status === 'running'
+            );
+            const progressDetail = (m.kind === 'assistant' ? m.tools : undefined)
+              ?.find(
+                (t) =>
+                  t.status === 'running' &&
+                  (!t.tool || t.tool === 'progress')
+              )?.detail;
+            const showThinking =
+              m.kind === 'assistant' &&
+              viewBusy &&
+              !m.content &&
+              runningVisible.length === 0;
 
             return (
               <article
@@ -753,7 +897,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                               {running ? (
                                 <span className="chat-tool-spin" />
                               ) : (
-                                '✓'
+                                <Icon name="check" size={12} />
                               )}
                             </span>
                             <span className="chat-tool-label">
@@ -766,20 +910,24 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                   )}
                   {m.content ? (
                     <MessageBody text={m.content} streaming={isStreaming} />
-                  ) : m.kind === 'assistant' && viewBusy ? (
+                  ) : showThinking ? (
                     <div className="chat-content chat-thinking">
                       <span className="chat-thinking-dots" aria-hidden>
                         <i />
                         <i />
                         <i />
                       </span>
-                      <span>
-                        {m.tools?.find((t) => t.status === 'running')?.detail ||
-                          'Trabajando…'}
-                      </span>
+                      <span>{progressDetail || 'Trabajando…'}</span>
                     </div>
                   ) : null}
-                  {m.kind === 'assistant' && m.usage && m.content ? (
+                  {m.kind === 'assistant' &&
+                  viewBusy &&
+                  m.content &&
+                  runningVisible.length === 0 ? (
+                    <p className="chat-usage">
+                      {progressDetail || 'Generando…'}
+                    </p>
+                  ) : m.kind === 'assistant' && m.usage && m.content ? (
                     <p className="chat-usage" title={usageTitle(m.usage)}>
                       {formatUsageLine(m.usage)}
                     </p>
@@ -843,6 +991,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                     onClick={stopGeneration}
                     aria-label="Detener consulta"
                   >
+                    <Icon name="stop" size={14} />
                     Detener
                   </button>
                 ) : (
@@ -851,6 +1000,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                     className="btn btn-compact"
                     disabled={!input.trim() || noProjects}
                   >
+                    <Icon name="send" size={14} />
                     Enviar
                   </button>
                 )}
