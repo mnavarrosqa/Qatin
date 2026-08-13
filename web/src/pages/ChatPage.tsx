@@ -249,6 +249,75 @@ function prefersReducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
+function precedingUserContent(
+  messages: UiMessage[],
+  assistantIndex: number
+): string | null {
+  for (let i = assistantIndex - 1; i >= 0; i--) {
+    if (messages[i].kind === 'user' && messages[i].content.trim()) {
+      return messages[i].content;
+    }
+  }
+  return null;
+}
+
+function ChatMsgActions({
+  content,
+  failed,
+  retryPrompt,
+  busy,
+  onRetry,
+}: {
+  content: string;
+  failed?: boolean;
+  retryPrompt?: string | null;
+  busy?: boolean;
+  onRetry?: (prompt: string) => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const canRetry = Boolean(failed && retryPrompt && onRetry);
+  if (!content && !canRetry) return null;
+
+  async function copy() {
+    if (!content) return;
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      return;
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return (
+    <div className="chat-msg-actions">
+      {canRetry ? (
+        <button
+          type="button"
+          className="chat-msg-action chat-msg-action-retry"
+          onClick={() => onRetry?.(retryPrompt!)}
+          disabled={busy}
+        >
+          <Icon name="retry" size={14} />
+          Reintentar
+        </button>
+      ) : null}
+      {content ? (
+        <button
+          type="button"
+          className="chat-msg-action"
+          onClick={copy}
+          aria-label={copied ? 'Copiado' : 'Copiar'}
+          title={copied ? 'Copiado' : 'Copiar'}
+        >
+          <Icon name={copied ? 'check' : 'copy'} size={14} />
+          {copied ? 'Copiado' : 'Copiar'}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function enqueueRunId(tools?: ToolStep[]): number | null {
   if (!tools) return null;
   for (let i = tools.length - 1; i >= 0; i--) {
@@ -310,7 +379,10 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const viewMessages = liveForActive ? liveForActive.messages : messages;
   const viewBusy = liveForActive ? liveForActive.busy : busy;
   const viewSession = liveForActive?.session || session;
-  const viewError = error;
+  const lastView = viewMessages[viewMessages.length - 1];
+  const errorShownInBubble =
+    !viewBusy && lastView?.kind === 'assistant' && Boolean(lastView.failed);
+  const viewError = errorShownInBubble ? '' : error;
 
   // Keep local mirrors in sync so session switches / reloads stay consistent
   useEffect(() => {
@@ -696,7 +768,9 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const needsProject = projects.length > 0 && selectedProjectId === '';
   const noProjects = projects.length === 0 && !loading;
   const followUps =
-    !viewBusy && !noProjects ? getFollowUps(viewMessages) : [];
+    !viewBusy && !noProjects && !errorShownInBubble
+      ? getFollowUps(viewMessages)
+      : [];
   const coveragePromptActive =
     followUps.length > 0 && followUps.every((f) => f.id.startsWith('cases-'));
 
@@ -942,11 +1016,17 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               m.kind === 'assistant' &&
               viewBusy &&
               mi === viewMessages.length - 1 &&
-              Boolean(m.content);
+              Boolean(m.content) &&
+              !m.failed;
+            const isFailed = m.kind === 'assistant' && Boolean(m.failed);
             const showFollowUps =
               m.kind === 'assistant' &&
+              !isFailed &&
               mi === viewMessages.length - 1 &&
               followUps.length > 0;
+            const showActions =
+              !isStreaming &&
+              (Boolean(m.content) || isFailed);
             const visibleTools =
               m.kind === 'assistant'
                 ? (m.tools || []).filter((t) => t.tool && t.tool !== 'progress')
@@ -977,6 +1057,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                   'chat-msg',
                   m.kind === 'user' ? 'chat-msg-user' : 'chat-msg-assistant',
                   sameAsPrev ? 'chat-msg-continued' : '',
+                  isFailed ? 'is-failed' : '',
                 ]
                   .filter(Boolean)
                   .join(' ')}
@@ -1035,6 +1116,10 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                     ) : (
                       <MessageBody text={m.content} streaming={isStreaming} />
                     )
+                  ) : isFailed ? (
+                    <div className="chat-content">
+                      <p className="chat-para">Falló el envío</p>
+                    </div>
                   ) : showThinking ? (
                     <div className="chat-content chat-thinking">
                       <span className="chat-thinking-dots" aria-hidden>
@@ -1044,6 +1129,19 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                       </span>
                       <span>{progressDetail || 'Trabajando…'}</span>
                     </div>
+                  ) : null}
+                  {showActions ? (
+                    <ChatMsgActions
+                      content={m.content}
+                      failed={isFailed}
+                      retryPrompt={
+                        isFailed
+                          ? precedingUserContent(viewMessages, mi)
+                          : null
+                      }
+                      busy={viewBusy}
+                      onRetry={sendMessage}
+                    />
                   ) : null}
                   {m.kind === 'assistant' &&
                   viewBusy &&

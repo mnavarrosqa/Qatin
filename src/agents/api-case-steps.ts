@@ -86,8 +86,11 @@ export function parseApiEndpoint(
     const methodOnly = String(raw).match(
       /\b(?:enviar|send|call)\s+(GET|POST|PUT|PATCH|DELETE)\b/i
     );
-    if (methodOnly) {
-      return { method: methodOnly[1].toUpperCase() as ApiHttpMethod, path: '/' };
+    if (methodOnly && !fallback) {
+      fallback = {
+        method: methodOnly[1].toUpperCase() as ApiHttpMethod,
+        path: '/',
+      };
     }
   }
   if (fallback) return fallback;
@@ -159,18 +162,32 @@ export function resolveApiBaseUrl(baseUrl?: string | null): string {
     'http://localhost:3000';
 }
 
+/** Expand a single {{ENV_KEY}} from process.env — never invent values. */
+export function resolveEnvTemplate(
+  value: string,
+  opts?: { required?: boolean }
+): string {
+  const missing: string[] = [];
+  const out = value.replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
+    const v = process.env[key];
+    if (!v?.trim()) {
+      missing.push(key);
+      return `{{${key}}}`;
+    }
+    return v.trim();
+  });
+  if (missing.length && opts?.required !== false) {
+    throw new Error(
+      `Faltan valores reales en env (${[...new Set(missing)].join(', ')}). No inventar; setear variables o capturar en Network.`
+    );
+  }
+  return out;
+}
+
 /** Expand {{ACOPIO_ID}} / {acopioId} from env — never invent numeric IDs. */
 export function resolvePathTemplates(path: string): string {
   const missing: string[] = [];
-  const out = path
-    .replace(/\{\{(\w+)\}\}/g, (_, key: string) => {
-      const v = process.env[key];
-      if (!v?.trim()) {
-        missing.push(key);
-        return `{{${key}}}`;
-      }
-      return v.trim();
-    })
+  const out = resolveEnvTemplate(path, { required: false })
     .replace(/\{([A-Za-z_][\w]*)\}/g, (full, key: string) => {
       if (/^id$/i.test(key)) {
         // Ambiguous {id} — require explicit env vars instead of inventing.
@@ -188,10 +205,33 @@ export function resolvePathTemplates(path: string): string {
       }
       return v.trim();
     });
+  if (/\{\{\w+\}\}/.test(out)) {
+    const still = [...out.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]);
+    missing.push(...still);
+  }
   if (missing.length) {
     throw new Error(
       `Faltan IDs reales en env (${[...new Set(missing)].join(', ')}). No inventar; setear variables o capturar en Network.`
     );
+  }
+  return out;
+}
+
+/** Expand {{ENV}} placeholders inside a prepared JSON payload. */
+export function resolvePayloadTemplates(
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload)) {
+    if (typeof v === 'string') {
+      if (v === 'null') {
+        out[k] = null;
+        continue;
+      }
+      out[k] = resolveEnvTemplate(v);
+    } else {
+      out[k] = v;
+    }
   }
   return out;
 }

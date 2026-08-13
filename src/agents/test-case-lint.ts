@@ -205,7 +205,10 @@ export function lintTestCases(
       const needsQuote =
         (FILL_OR_SELECT.test(step) || CLICK_STEP.test(step)) &&
         !HAS_QUOTED.test(step) &&
-        !/iniciar sesi[oó]n con el usuario qa/i.test(step);
+        !/iniciar sesi[oó]n con el usuario qa/i.test(step) &&
+        !/hamburguesa|\bhamburger\b|men[uú]\s+(lateral|principal)|abrir\s+(el\s+)?men[uú]/i.test(
+          step
+        );
       if (needsQuote) {
         missingQuotes++;
         findings.push({

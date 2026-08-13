@@ -14,7 +14,15 @@ import {
   resolveApiBaseUrl,
   resolveApiBearerToken,
   resolvePathTemplates,
+  resolvePayloadTemplates,
 } from './api-case-steps';
+import {
+  clickViaHamburger,
+  isHamburgerStep,
+  openHamburgerMenu,
+  revealViaHamburger,
+  selectorsMatchingQuotedLabel,
+} from './hamburger-nav';
 
 export interface ExecutionResult {
   success: boolean;
@@ -410,16 +418,18 @@ export class TestExecutor {
             const rawPath =
               ep.path === '/' ? parseApiEndpoint(scenario).path : ep.path;
             const pathName = resolvePathTemplates(rawPath);
+            const body = resolvePayloadTemplates(payload);
+            payload = body;
             const res =
               method === 'GET'
                 ? await context.get(pathName)
                 : method === 'DELETE'
                   ? await context.delete(pathName)
                   : method === 'PUT'
-                    ? await context.put(pathName, { data: payload })
+                    ? await context.put(pathName, { data: body })
                     : method === 'PATCH'
-                      ? await context.patch(pathName, { data: payload })
-                      : await context.post(pathName, { data: payload });
+                      ? await context.patch(pathName, { data: body })
+                      : await context.post(pathName, { data: body });
             lastStatus = res.status();
             lastBody = await res.json().catch(async () => res.text());
             logger.info(`API ${method} ${apiBase}${pathName} → ${lastStatus}`, {
@@ -818,6 +828,16 @@ export class TestExecutor {
       return;
     }
 
+    if (isHamburgerStep(processedStep)) {
+      const opened = await openHamburgerMenu(page);
+      if (!opened) {
+        throw new Error(
+          'No se encontró el menú hamburguesa (icono menu / sidenav / navbar-toggler)'
+        );
+      }
+      return;
+    }
+
     if (
       /\bclick\b|\bclic\b|\bpulsar\b|\bpresionar\b|\bconfirmar\b|\bguardar\b|\benviar\b/.test(
         stepLower
@@ -828,12 +848,12 @@ export class TestExecutor {
         processedStep,
         scenario,
         async (selector) => {
-          await page.click(selector);
+          await clickViaHamburger(page, selector);
         },
         async () => {
           const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
           if (textMatch) {
-            await page.click(`text=${textMatch[1]}`);
+            await clickViaHamburger(page, `text=${textMatch[1]}`);
             return true;
           }
           // Vague "Confirmar la acción principal" → try primary submit.
@@ -919,11 +939,16 @@ export class TestExecutor {
         processedStep,
         scenario,
         async (selector) => {
+          await revealViaHamburger(page, page.locator(selector));
           await page.waitForSelector(selector, { timeout: 5000 });
         },
         async () => {
           const textMatch = processedStep.match(/['"]([^'"]+)['"]/);
           if (textMatch) {
+            await revealViaHamburger(
+              page,
+              page.locator(`text=${textMatch[1]}`)
+            );
             await page.waitForSelector(`text=${textMatch[1]}`, {
               timeout: 5000,
             });
@@ -1259,7 +1284,10 @@ export class TestExecutor {
     push(primary);
 
     if (this.plugins.selfHeal) {
-      for (const s of scenario.selectors || []) {
+      for (const s of selectorsMatchingQuotedLabel(
+        step,
+        scenario.selectors || []
+      )) {
         push(s);
       }
 

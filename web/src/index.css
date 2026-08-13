@@ -1658,6 +1658,61 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.chat-msg-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.15rem;
+  margin-top: 0.15rem;
+}
+
+.chat-msg-user .chat-msg-actions {
+  justify-content: flex-end;
+}
+
+.chat-msg-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+  padding: 0.28rem 0.45rem;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.chat-msg-action:hover {
+  color: var(--ink);
+  background: rgba(22, 40, 36, 0.55);
+}
+
+.chat-msg-action:focus-visible {
+  outline: 2px solid rgba(232, 165, 75, 0.45);
+  outline-offset: 2px;
+}
+
+.chat-msg-action:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chat-msg-action-retry {
+  color: var(--accent);
+}
+
+.chat-msg-action-retry:hover {
+  color: var(--ink);
+}
+
+.chat-msg-assistant.is-failed .chat-content {
+  color: color-mix(in srgb, var(--ink) 78%, var(--fail));
+}
+
 .chat-msg-assistant .chat-thinking {
   background: rgba(22, 40, 36, 0.55);
   border: 1px solid var(--line);
@@ -2441,7 +2496,8 @@ button {
 
   .nav a,
   .btn:not(.btn-icon),
-  .settings-tab {
+  .settings-tab,
+  .chat-msg-action {
     min-height: 44px;
   }
 

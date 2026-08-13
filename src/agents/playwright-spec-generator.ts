@@ -10,6 +10,7 @@ import {
   resolveApiBaseUrl,
 } from './api-case-steps';
 import { getPlaywrightGeneratedDir } from '../paths';
+import { isHamburgerStep } from './hamburger-nav';
 
 export type GeneratedSpecFile = {
   /** Absolute path written (or would be written). */
@@ -118,6 +119,7 @@ function locatorExpr(selector: string | null, fallbackText: string | null): stri
 
 type StepKind =
   | 'navigate'
+  | 'hamburger'
   | 'click'
   | 'login'
   | 'fill'
@@ -130,6 +132,7 @@ type StepKind =
 
 function classifyStep(step: string): StepKind {
   const stepLower = step.toLowerCase();
+  if (isHamburgerStep(step)) return 'hamburger';
   if (
     /\bnavegar\b|\bir\s+a\b|\bvisitar\b|\bnavigate\b|\bgo\s+to\b|\bingresar\s+a\b|\bentrar\s+(a|en)\b/.test(
       stepLower
@@ -202,11 +205,17 @@ function emitStepLines(
         `  });`,
       ];
     }
+    case 'hamburger':
+      return [
+        `  await test.step('${title}', async () => {`,
+        `    await openHamburgerMenu(page);`,
+        `  });`,
+      ];
     case 'click': {
       const target = locatorExpr(selector, quoted);
       return [
         `  await test.step('${title}', async () => {`,
-        `    await ${target}.first().click();`,
+        `    await clickViaNav(page, ${target});`,
         `  });`,
       ];
     }
@@ -255,6 +264,7 @@ function emitStepLines(
         `  await test.step('${title}', async () => {`,
       ];
       if (selector || quoted) {
+        lines.push(`    await revealViaNav(page, ${target});`);
         lines.push(`    await expect(${target}.first()).toBeVisible({ timeout: 5000 });`);
       } else {
         lines.push(`    await expect(page).not.toHaveURL('about:blank');`);
@@ -322,6 +332,17 @@ function needsLoginHelper(scenarios: TestScenario[]): boolean {
     (s) =>
       !looksLikeApiCase(s) &&
       (s.steps || []).some((step) => classifyStep(step) === 'login')
+  );
+}
+
+function needsNavHelper(scenarios: TestScenario[]): boolean {
+  return scenarios.some(
+    (s) =>
+      !looksLikeApiCase(s) &&
+      (s.steps || []).some((step) => {
+        const kind = classifyStep(step);
+        return kind === 'click' || kind === 'verify' || kind === 'hamburger';
+      })
   );
 }
 
@@ -401,8 +422,17 @@ function emitApiScenarioBody(scenario: TestScenario, apiBase: string): string[] 
             `      __response = await request.${methodLower}(\`\${API_BASE}\${__path}\`, { headers: API_HEADERS });`
           );
         } else {
+          lines.push(`      const __bodyPayload: Record<string, unknown> = {};`);
+          lines.push(`      for (const [k, v] of Object.entries(__payload)) {`);
+          lines.push(`        if (typeof v === 'string' && v === 'null') { __bodyPayload[k] = null; continue; }`);
+          lines.push(`        if (typeof v === 'string' && /\\{\\{(\\w+)\\}\\}/.test(v)) {`);
+          lines.push(`          __bodyPayload[k] = v.replace(/\\{\\{(\\w+)\\}\\}/g, (_: string, key: string) => {`);
+          lines.push(`            const ev = process.env[key]; if (!ev) throw new Error('Falta env ' + key + ' (valor real; no inventar)'); return ev;`);
+          lines.push(`          });`);
+          lines.push(`        } else { __bodyPayload[k] = v; }`);
+          lines.push(`      }`);
           lines.push(
-            `      __response = await request.${methodLower}(\`\${API_BASE}\${__path}\`, { data: __payload, headers: API_HEADERS });`
+            `      __response = await request.${methodLower}(\`\${API_BASE}\${__path}\`, { data: __bodyPayload, headers: API_HEADERS });`
           );
         }
         lines.push(
@@ -492,11 +522,16 @@ export function renderPlaywrightSpec(opts: {
   const hasApi = scenarios.some((s) => looksLikeApiCase(s));
   const hasUi = scenarios.some((s) => !looksLikeApiCase(s));
   const loginHelper = needsLoginHelper(scenarios);
+  const navHelper = needsNavHelper(scenarios);
 
   const imports = hasUi
     ? hasApi
-      ? `import { test, expect, type Page, type APIResponse } from '@playwright/test';`
-      : `import { test, expect, type Page } from '@playwright/test';`
+      ? navHelper
+        ? `import { test, expect, type Page, type Locator, type APIResponse } from '@playwright/test';`
+        : `import { test, expect, type Page, type APIResponse } from '@playwright/test';`
+      : navHelper
+        ? `import { test, expect, type Page, type Locator } from '@playwright/test';`
+        : `import { test, expect, type Page } from '@playwright/test';`
     : `import { test, expect, type APIResponse } from '@playwright/test';`;
 
   const lines: string[] = [
@@ -537,6 +572,43 @@ export function renderPlaywrightSpec(opts: {
       `  await passwordField.fill(password);`,
       `  await page.getByRole('button', { name: /iniciar|login|entrar|sign in/i }).first().click();`,
       `  await page.waitForLoadState('networkidle').catch(() => undefined);`,
+      `}`,
+      ``
+    );
+  }
+
+  if (navHelper) {
+    lines.push(
+      `async function openHamburgerMenu(page: Page) {`,
+      `  const burger = page.locator(`,
+      `    [`,
+      `      'button:has(mat-icon:text-is("menu"))',`,
+      `      'button:has(mat-icon:has-text("menu"))',`,
+      `      'button[aria-label*="menu" i]',`,
+      `      'button[aria-label*="menú" i]',`,
+      `      'button.navbar-toggler',`,
+      `      'ion-menu-button',`,
+      `      '[class*="hamburger" i]',`,
+      `    ].join(', ')`,
+      `  ).first();`,
+      `  if (await burger.isVisible().catch(() => false)) {`,
+      `    await burger.click();`,
+      `    return;`,
+      `  }`,
+      `  const toolbar = page.locator('header button, mat-toolbar button, [role="banner"] button').first();`,
+      `  if (await toolbar.isVisible().catch(() => false)) {`,
+      `    await toolbar.click();`,
+      `  }`,
+      `}`,
+      ``,
+      `async function revealViaNav(page: Page, target: Locator) {`,
+      `  if (await target.first().isVisible().catch(() => false)) return;`,
+      `  await openHamburgerMenu(page);`,
+      `}`,
+      ``,
+      `async function clickViaNav(page: Page, target: Locator) {`,
+      `  await revealViaNav(page, target);`,
+      `  await target.first().click();`,
       `}`,
       ``
     );

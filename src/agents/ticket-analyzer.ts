@@ -25,8 +25,9 @@ const DEFAULT_ANALYZER_INSTRUCTIONS_UI_FULL = `Quality rules (UI):
 - Click/confirm steps MUST include the button label in quotes: "Hacer click en 'Crear orden'". Never write bare "Confirmar la acción principal".
 - expectedResults: one verifiable assertion per step (1:1 with steps). Visible text, URL, UI state, error message, redirect. Quote the exact message/label when known. Never leave a step without an expected result.
 - Use realistic test data coherent with the ticket domain. State them in the description AND in the steps.
-- Selector priority: [data-testid] > [role] with name > [name] > [id] > tag by type. Avoid fragile selectors like div:nth-child or generated CSS classes.
-- URLs: use {{BASE_URL}} with realistic paths FROM THE TICKET. If the ticket does not name a path, navigate to {{BASE_URL}} and click by visible label — never invent deep links.
+- Selector priority: [data-testid] > [role] with name > [name] > [id] > tag by type. Avoid fragile selectors like div:nth-child or generated CSS classes. If you are unsure about the real selector or label, use a reasonable placeholder — the chat agent will call suggest_selectors with headless Chrome to discover real selectors before saving.
+- URLs: use {{BASE_URL}} with realistic paths FROM THE TICKET. If the ticket does not name a path, navigate to {{BASE_URL}} and click by visible label — never invent deep links. The chat agent can call explore_app to discover real navigation paths if needed.
+- Hamburger / sidenav: many apps keep a hamburger menu even on desktop. Cases may say "Hacer click en 'F12'" without an extra menu step — the executor opens the hamburger if the label is not on screen. Optional explicit step: "Abrir el menú hamburguesa".
 
 Respect the requested coverage (see the user prompt). Each scenario must be independently executable.
 
@@ -47,6 +48,7 @@ const DEFAULT_ANALYZER_INSTRUCTIONS_UI_COMPACT = `Rules (UI):
 - Forbidden vague steps: "datos válidos", "Confirmar la acción principal", "Completar el formulario".
 - expectedResults: one assertion per step. Visible text, URL, UI state, error.
 - URLs: {{BASE_URL}} + paths from the ticket only — never invent deep links.
+- Desktop hamburger/sidenav: executor opens it when the click target is hidden. Optional step "Abrir el menú hamburguesa".
 - Respect requested coverage. Each scenario independently executable.
 - No generic smoke tests. Every case must trace to the ticket.`;
 
@@ -74,7 +76,7 @@ Payload contract (critical — applies to multi-step UI collapsed into one endpo
 - Model the body as structured JSON the API would accept (e.g. facturacion + insumos[] + distribucion), NOT as UI button flags.
 - UI modes like "Liquidar total para Agroinsumos", "Distribuir equitativamente", "Liquidar saldo restante" MUST appear in the scenario title/description, but the Preparar payload step must spell out the resulting rows/quantities (destinoId/cantidad, etc.). Never invent booleans like liquidarTotalParaAgroinsumos=true unless the ticket's documented contract shows those fields.
 - Prefer nested or explicit distribution lines whose quantities sum to the line total; treat named entities (e.g. Agroinsumos) as a normal destination id unless the ticket defines a special type field.
-- If the real path/payload is unknown, say "pendiente confirmar en Network/Swagger" in the description — do NOT invent a plausible path, method, or IDs.
+- If the real path/payload is unknown, use {{PLACEHOLDER}} notation (e.g. {{ACOPIO_ID}}) and flag it — the chat agent will run discover_api_contract or suggest_selectors with headless Chrome to fill in real values before saving. Do NOT invent a plausible path, method, or IDs.
 
 Do NOT:
 - Default to UI/Playwright steps for a BE ticket.

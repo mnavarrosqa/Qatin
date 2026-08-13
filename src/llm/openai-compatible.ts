@@ -14,6 +14,27 @@ import { logger } from '../utils/logger';
 /** Safety cap so a hung Ollama does not block forever. User can still Stop. */
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
+/**
+ * GPT-5.x (Sol/Terra/Luna) and o-series reject custom sampling —
+ * only the API default (temperature=1) is allowed. Omit the field.
+ */
+function modelLocksTemperature(model: string): boolean {
+  const m = model.toLowerCase();
+  return (
+    /^gpt-5(\.|-|_)/.test(m) ||
+    m.includes('gpt-5.6') ||
+    /^o[1-9](-|$)/.test(m)
+  );
+}
+
+/**
+ * gpt-5.6* reasons by default on chat/completions. Function tools require
+ * either /v1/responses or reasoning_effort=none on this endpoint.
+ */
+function modelNeedsNoneReasoningWithTools(model: string): boolean {
+  return /gpt-5\.6/i.test(model);
+}
+
 function usageFromOpenAi(
   usage?: {
     prompt_tokens?: number;
@@ -136,6 +157,23 @@ export class OpenAICompatibleClient implements LlmProviderClient {
     return this.disableThinking ? { think: false } : {};
   }
 
+  /** Spread into chat.completions.create — empty when the model locks sampling. */
+  private temperatureParam(requested?: number): { temperature?: number } {
+    if (modelLocksTemperature(this.model)) return {};
+    return { temperature: requested ?? 0.3 };
+  }
+
+  /**
+   * When tools are present on gpt-5.6*, force reasoning off so chat/completions
+   * accepts function tools (otherwise OpenAI 400s with the default effort).
+   */
+  private reasoningParam(hasTools: boolean): { reasoning_effort?: 'none' } {
+    if (hasTools && modelNeedsNoneReasoningWithTools(this.model)) {
+      return { reasoning_effort: 'none' };
+    }
+    return {};
+  }
+
   private reqOpts(signal?: AbortSignal) {
     return signal ? { signal } : undefined;
   }
@@ -150,7 +188,7 @@ export class OpenAICompatibleClient implements LlmProviderClient {
         { role: 'system' as const, content: request.system },
         { role: 'user' as const, content: request.user },
       ],
-      temperature: request.temperature ?? 0.3,
+      ...this.temperatureParam(request.temperature),
       ...(useJsonFormat
         ? { response_format: { type: 'json_object' as const } }
         : {}),
@@ -228,12 +266,14 @@ export class OpenAICompatibleClient implements LlmProviderClient {
         },
       })) || undefined;
 
+    const hasTools = Boolean(tools?.length);
     const stream = await this.client.chat.completions.create(
       {
         model: this.model,
         messages: toOpenAiMessages(request.messages),
-        temperature: request.temperature ?? 0.3,
-        ...(tools?.length ? { tools } : {}),
+        ...this.temperatureParam(request.temperature),
+        ...(hasTools ? { tools } : {}),
+        ...this.reasoningParam(hasTools),
         ...this.ollamaExtras(),
         stream: true,
       } as OpenAI.Chat.ChatCompletionCreateParamsStreaming,
@@ -293,12 +333,14 @@ export class OpenAICompatibleClient implements LlmProviderClient {
         },
       })) || undefined;
 
+    const hasTools = Boolean(tools?.length);
     const response = await this.client.chat.completions.create(
       {
         model: this.model,
         messages: toOpenAiMessages(request.messages),
-        temperature: request.temperature ?? 0.3,
-        ...(tools?.length ? { tools } : {}),
+        ...this.temperatureParam(request.temperature),
+        ...(hasTools ? { tools } : {}),
+        ...this.reasoningParam(hasTools),
         ...this.ollamaExtras(),
       } as OpenAI.Chat.ChatCompletionCreateParamsNonStreaming,
       this.reqOpts(request.signal)

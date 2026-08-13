@@ -21,6 +21,7 @@ export type UiMessage =
       content: string;
       tools?: ToolStep[];
       usage?: ChatUsage;
+      failed?: boolean;
     };
 
 export function usageFromMeta(meta: unknown): ChatUsage | undefined {
@@ -30,6 +31,14 @@ export function usageFromMeta(meta: unknown): ChatUsage | undefined {
     return undefined;
   }
   return u;
+}
+
+export function failedFromMeta(meta: unknown): boolean {
+  return Boolean(
+    meta &&
+      typeof meta === 'object' &&
+      (meta as { error?: unknown }).error === true
+  );
 }
 
 export function toUiMessages(rows: ChatMessage[]): UiMessage[] {
@@ -43,6 +52,7 @@ export function toUiMessages(rows: ChatMessage[]): UiMessage[] {
             id: String(m.id),
             content: m.content || '',
             usage: usageFromMeta(m.meta),
+            failed: failedFromMeta(m.meta) || undefined,
           }
     );
 }
@@ -273,6 +283,7 @@ export async function startChatGeneration(opts: {
           updateAssistant(assistantId, (m) => ({
             ...m,
             content: m.content || ev.error,
+            failed: true,
           }));
         }
       },
@@ -282,9 +293,14 @@ export async function startChatGeneration(opts: {
     stoppedByUser =
       err?.name === 'AbortError' || Boolean((nextController as any).qatinStopped);
     if (!stoppedByUser) {
-      patchGeneration({
-        error: err.message || 'Falló el envío',
-      });
+      const msg = err.message || 'Falló el envío';
+      patchGeneration({ error: msg });
+      updateAssistant(assistantId, (m) => ({
+        ...m,
+        content: m.content.trim() ? m.content : msg,
+        failed: true,
+        tools: settleTools(m.tools, { dropProgress: true }),
+      }));
     }
   } finally {
     if (controller === nextController) {
@@ -324,9 +340,24 @@ export async function startChatGeneration(opts: {
                 ? liveTools
                 : last.tools,
             usage: last.usage || liveAssistant?.usage,
+            failed:
+              last.failed ||
+              liveAssistant?.failed ||
+              (!last.content.trim() && current.error ? true : undefined),
           };
           merged[merged.length - 1] = next;
           last = next;
+        } else if (liveAssistant && (liveAssistant.failed || current.error)) {
+          merged.push({
+            ...liveAssistant,
+            content:
+              liveAssistant.content.trim() ||
+              current.error ||
+              'Falló el envío',
+            failed: true,
+            tools: liveTools.length ? liveTools : liveAssistant.tools,
+          });
+          last = merged[merged.length - 1];
         }
 
         if (stoppedByUser) {

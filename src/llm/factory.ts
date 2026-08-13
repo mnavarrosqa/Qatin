@@ -213,7 +213,6 @@ export async function testLlmConnection(
     client.chatCompletion({
       system: 'You are a connection probe. Reply with exactly: OK',
       user: 'ping',
-      temperature: 0,
     }),
     TEST_TIMEOUT_MS,
     `Connection timed out after ${TEST_TIMEOUT_MS / 1000}s. Check that the host is reachable and the base URL uses the OpenAI-compatible /v1 path (e.g. http://host:11434/v1), not /api/chat.`

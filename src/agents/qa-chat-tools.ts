@@ -381,6 +381,67 @@ export const QA_CHAT_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    name: 'jira_get_comments',
+    description:
+      'Lee los comentarios de un ticket Jira. Útil para buscar notas del dev (endpoints, IDs, cómo testear) sin volver a traer todo el ticket.',
+    parameters: {
+      type: 'object',
+      properties: {
+        ticket_key: {
+          type: 'string',
+          description: 'Clave del ticket (ej. AGDCF-4790)',
+        },
+      },
+      required: ['ticket_key'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'jira_post_comment',
+    description:
+      'Postea un comentario en un ticket Jira (formato texto plano o ADF). SOLO después de que el usuario confirme explícitamente. Nunca postear automáticamente.',
+    parameters: {
+      type: 'object',
+      properties: {
+        ticket_key: {
+          type: 'string',
+          description: 'Clave del ticket (ej. AGDCF-4790)',
+        },
+        body: {
+          type: 'string',
+          description: 'Texto del comentario a postear',
+        },
+        confirmed: {
+          type: 'boolean',
+          description: 'Debe ser true solo si el usuario confirmó postear el comentario',
+        },
+      },
+      required: ['ticket_key', 'body', 'confirmed'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'jira_search',
+    description:
+      'Busca tickets en Jira por JQL. Útil para encontrar tickets relacionados (épica padre, stories hermanas, bugs previos del mismo módulo) y obtener contexto extra cuando un ticket es escueto.',
+    parameters: {
+      type: 'object',
+      properties: {
+        jql: {
+          type: 'string',
+          description:
+            'JQL query (ej. "project = AGDCF AND type = Epic AND summary ~ liquidacion", o "issue in linkedIssues(AGDCF-4790)")',
+        },
+        max_results: {
+          type: 'number',
+          description: 'Máximo de resultados (default 10, max 25)',
+        },
+      },
+      required: ['jql'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'list_recent_runs',
     description: 'Lista ejecuciones recientes del proyecto activo.',
     parameters: {
@@ -604,6 +665,15 @@ export class QaChatToolRunner {
 
       case 'get_run_status':
         return this.getRunStatus(args);
+
+      case 'jira_search':
+        return this.jiraSearch(args);
+
+      case 'jira_get_comments':
+        return this.jiraGetComments(args);
+
+      case 'jira_post_comment':
+        return this.jiraPostComment(args);
 
       case 'publish_results_to_jira':
         return this.publishResultsToJira(args);
@@ -1530,6 +1600,84 @@ export class QaChatToolRunner {
     return status;
   }
 
+  private async jiraSearch(args: Record<string, unknown>) {
+    const jql = typeof args.jql === 'string' ? args.jql.trim() : '';
+    if (!jql) return { error: 'jql es requerido' };
+
+    const maxResults = Math.min(
+      typeof args.max_results === 'number' && args.max_results > 0
+        ? args.max_results
+        : 10,
+      25
+    );
+
+    const jiraClient = await getJiraClient();
+    const data = await jiraClient.searchIssues(jql, maxResults);
+    const issues = Array.isArray(data?.issues) ? data.issues : [];
+
+    return {
+      total: data?.total ?? issues.length,
+      returned: issues.length,
+      issues: issues.map((issue: any) => ({
+        key: issue.key,
+        summary: issue.fields?.summary || '',
+        type: issue.fields?.issuetype?.name || '',
+        status: issue.fields?.status?.name || '',
+        priority: issue.fields?.priority?.name || '',
+      })),
+    };
+  }
+
+  private async jiraGetComments(args: Record<string, unknown>) {
+    const ticketKey =
+      typeof args.ticket_key === 'string' ? args.ticket_key.trim().toUpperCase() : '';
+    if (!ticketKey) return { error: 'ticket_key es requerido' };
+
+    const jiraClient = await getJiraClient();
+    const issue = await jiraClient.getIssue(ticketKey);
+    const text = formatJiraCommentsText(issue.fields.comment);
+    const total = issue.fields.comment?.comments?.length ?? 0;
+
+    return {
+      ticket_key: ticketKey,
+      comments: text || '(sin comentarios)',
+      total,
+    };
+  }
+
+  private async jiraPostComment(args: Record<string, unknown>) {
+    if (args.confirmed !== true) {
+      return {
+        error:
+          'Falta confirmación del usuario. Preguntá si quiere postear el comentario en Jira y solo llamá esta herramienta con confirmed=true cuando diga que sí.',
+      };
+    }
+
+    const ticketKey =
+      typeof args.ticket_key === 'string' ? args.ticket_key.trim().toUpperCase() : '';
+    if (!ticketKey) return { error: 'ticket_key es requerido' };
+
+    const body = typeof args.body === 'string' ? args.body.trim() : '';
+    if (!body) return { error: 'body es requerido' };
+
+    const jiraClient = await getJiraClient();
+    const adfBody = {
+      type: 'doc',
+      version: 1,
+      content: body.split('\n\n').map((paragraph) => ({
+        type: 'paragraph',
+        content: [{ type: 'text', text: paragraph }],
+      })),
+    };
+    await jiraClient.addComment(ticketKey, adfBody);
+
+    return {
+      ok: true,
+      ticket_key: ticketKey,
+      hint: 'Confirmá al usuario que el comentario quedó publicado en el ticket.',
+    };
+  }
+
   private async publishResultsToJira(args: Record<string, unknown>) {
     if (args.confirmed !== true) {
       return {
@@ -1610,8 +1758,15 @@ function toolLabel(name: string): string {
       return 'Descubriendo contrato API (Network)';
     case 'export_xray_csv':
       return 'Armando CSV para Xray';
+    case 'jira_search':
+      return 'Buscando en Jira';
+    case 'jira_get_comments':
+      return 'Leyendo comentarios de Jira';
+    case 'jira_post_comment':
+      return 'Posteando comentario en Jira';
     case 'enqueue_run':
-      return 'Encolando ejecución';    case 'get_run_status':
+      return 'Encolando ejecución';
+    case 'get_run_status':
       return 'Consultando ejecución';
     case 'publish_results_to_jira':
       return 'Publicando en Jira';
@@ -1677,6 +1832,12 @@ function summarizeToolResult(name: string, result: unknown): unknown {
         jiraPosted: r.jiraPosted,
         canPublishToJira: r.canPublishToJira,
       };
+    case 'jira_search':
+      return { total: r.total, returned: r.returned };
+    case 'jira_get_comments':
+      return { ticket_key: r.ticket_key, total: r.total };
+    case 'jira_post_comment':
+      return { ticket_key: r.ticket_key, ok: r.ok };
     case 'publish_results_to_jira':
       return { ticketId: r.ticketId, jiraPosted: r.jiraPosted };
     case 'list_recent_runs':

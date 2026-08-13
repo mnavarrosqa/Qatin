@@ -407,6 +407,10 @@ import {
   payloadFromSteps,
 } from '../src/agents/api-case-steps';
 import { generatePlaywrightSpecs } from '../src/agents/playwright-spec-generator';
+import {
+  isHamburgerStep,
+  selectorsMatchingQuotedLabel,
+} from '../src/agents/hamburger-nav';
 
 assert.strictEqual(classifyApiStep('Preparar payload con nombre'), 'prepare_payload');
 assert.strictEqual(classifyApiStep('Enviar POST al endpoint'), 'send');
@@ -479,6 +483,48 @@ assert.strictEqual(
   assert.ok(content.includes('request.post'), 'API spec posts');
   assert.ok(content.includes('/api/recurso'), 'API spec includes endpoint path');
   assert.ok(!content.includes('Playwright UI no aplica'), 'API no longer blocked');
+}
+
+assert.ok(isHamburgerStep('Abrir el menú hamburguesa'));
+assert.ok(isHamburgerStep('Hacer click en el menú hamburguesa'));
+assert.ok(!isHamburgerStep("Hacer click en 'F12'"));
+assert.deepStrictEqual(
+  selectorsMatchingQuotedLabel("Hacer click en 'F12'", [
+    "a:has-text('F12')",
+    "a:has-text('Dashboard')",
+    "button:has-text('F12')",
+  ]),
+  ["a:has-text('F12')", "button:has-text('F12')"]
+);
+
+{
+  const generated = generatePlaywrightSpecs({
+    strategy: {
+      testType: 'ui',
+      summary: 'UI hamburger',
+      estimatedDuration: 10,
+      priority: 'medium',
+      scenarios: [
+        {
+          id: 'TC-01',
+          description: '[Happy] Entrar a F12 por el menú',
+          steps: [
+            'Navegar a {{BASE_URL}}',
+            "Hacer click en 'F12'",
+            "Verificar que se muestra 'Dashboard'",
+          ],
+          expectedResults: ['ok', 'abre F12', 'Dashboard visible'],
+        },
+      ],
+    },
+    ticketKey: 'UI-HAMBURGER',
+    baseUrl: 'http://localhost:3000',
+    write: false,
+  });
+  const content = generated.files[0]?.content || '';
+  assert.ok(content.includes('clickViaNav'), 'UI spec clicks via hamburger helper');
+  assert.ok(content.includes('openHamburgerMenu'), 'UI spec can open hamburger');
+  assert.ok(content.includes('revealViaNav'), 'UI spec reveals via nav before assert');
 }
 
 console.log('smoke-chat-robustness: ok');

@@ -74,6 +74,12 @@ function formatProjectDirectory(
 
 const DEFAULT_CHAT_INSTRUCTIONS_FULL = `Workflow (strict order — never skip):
 1. User gives a ticket (Jira key or pasted text) → use fetch_ticket → explain using understanding.text from the tool (keep its sections: superficie, contraste, endpoint, modos, estado, persistencia, validaciones, entidades, cardinalidad, cálculos, payload, and any "Notas de comentarios"). Expand briefly if needed but do not invent facts absent from the ticket/comments/understanding. Jira comments often include how-to-test notes from the developer (endpoints, IDs, payloads, env) — treat those as authoritative. Do NOT ask for coverage after a pure analysis / "what do you understand" question.
+   **Sparse ticket enrichment** — if the ticket has a very short description (< 3 sentences), no acceptance criteria, and few or no comments, DO NOT just generate vague cases from a one-liner. Instead, proactively enrich your understanding BEFORE analyzing:
+   a) jira_search: find related tickets in the same project — the parent epic, sibling stories, or recent bugs in the same area (e.g. "project = XX AND type = Epic AND summary ~ keyword" or "project = XX AND status changed to Done AND summary ~ feature ORDER BY updated DESC"). Read the most relevant 1–2 hits with fetch_ticket to absorb their descriptions and comments.
+   b) explore_app / suggest_selectors: if the ticket mentions a page or feature, open it in headless Chrome. Observe the real UI — fields, buttons, labels, navigation paths. This gives you the concrete data the ticket is missing.
+   c) discover_api_contract: if the ticket is BE/API or the page makes API calls, capture real network traffic to understand the actual endpoints, params, and payloads.
+   d) jira_get_comments: check comments on related tickets too (sibling stories often have dev notes about the same module).
+   Use all discovered info (real selectors, real endpoints, real field labels, context from related tickets) to generate precise cases — never leave vague placeholders when you can look it up. Tell the user what extra context you found and from where.
 2. If they ask to create test cases and have NOT chosen coverage yet: do NOT call analyze_ticket. Ask briefly for coverage (one short line). Do NOT list options as text to type — the UI shows buttons (Happy path / Unhappy path / Corner / Todos). Short replies like "happy", "unhappy", "corner", "todos" still count. Wait. If analyze_ticket returns coverage_required, ask the same way.
 3. Once coverage is known (this message or a previous turn): use analyze_ticket with coverage=happy|unhappy|corner|all. Show the full plan (tag, description, preconditions, steps, expected results).
 4. User approves or already asked to save → use save_test_cases to persist them. Without saved cases, Playwright cannot run or export scripts.
@@ -84,6 +90,7 @@ const DEFAULT_CHAT_INSTRUCTIONS_FULL = `Workflow (strict order — never skip):
    If they only ask for "scripts Playwright" / ".spec.ts", call generate_playwright_specs only (no enqueue unless they also ask to run).
 6. Report results: what passed, what failed, screenshot URLs (/screenshots/...), and suggested next step. Never ask for coverage after enqueue_run or get_run_status.
 7. For Jira tickets: after reporting results, ask if they want to publish to Jira. Only call publish_results_to_jira with confirmed=true after an explicit yes. Never auto-publish.
+8. Jira comments: use jira_get_comments to read dev notes from a ticket without re-fetching the whole issue (useful mid-conversation to check how-to-test guidance). Use jira_post_comment to leave a comment on a ticket — ONLY after the user explicitly confirms. Never auto-post comments.
 
 Rules:
 - TC-01, TC-02, etc. are test CASE ids, never Jira ticket keys. Prefer the real ticket key from the conversation (e.g. AGDCF-4790).
@@ -97,6 +104,7 @@ Rules:
 - If enqueue_run or generate_playwright_specs returns code cases_required: tell the user to create/save cases first; do not claim a run was queued or scripts were generated.
 - If the user asks how a run is going / its status / results, call get_run_status (prefer the latest live run via list_recent_runs if unsure). NEVER call enqueue_run for a status question.
 - Never publish results to Jira unless the user explicitly confirms. ask first; then publish_results_to_jira with confirmed=true.
+- Never post a Jira comment (jira_post_comment) unless the user explicitly confirms. Ask first.
 - If config is missing (no project, no base_url, no LLM, no Jira creds): say exactly what is missing and where to configure it (Settings or Projects page).
 - QA credentials (email/password) live on the project. enqueue_run and Playwright execution read them automatically. NEVER ask the user for TEST_USER_EMAIL, TEST_USER_PASSWORD, API_TOKEN, or login credentials when the active project shows qa_creds=sí (or tools return hasQaCredentials/has_password true). If qa_creds=no, tell them to set the test user in Proyectos — do not ask them to paste secrets in chat.
 - Respond in human-readable text, not raw JSON (unless user asks for technical detail).
@@ -106,8 +114,16 @@ Rules:
 - Always include screenshot URLs (/screenshots/...) when available for this run.
 - If a run fails: analyze whether it is an app bug, a broken test case (bad selector, ambiguous step), or a config issue. Prefer fixing vague/invented navigation next.
 - If save_test_cases returns cases_lint_failed: show the blocking findings briefly and fix/regenerate — do not claim cases were saved.
-- When API cases need real IDs, filter params, or have "pendiente confirmar en Network": call discover_api_contract (uses project QA login + SPA Network). Rewrite cases from matches/suggestedEnv only — never invent. If CAMPANIA_ID/params still missing, say what Network still needs.
 - BE/API cases run with Playwright request (API). API host is derived from project base_url (login suffix stripped). Auth uses the project QA user when running via Qatin; do not ask the user to set API_TOKEN in chat. Xray export remains available when the user asks for import CSV.
+
+Proactive discovery — NEVER leave gaps, NEVER invent:
+- You have headless Chrome (Playwright) at your disposal via discover_api_contract, suggest_selectors, and explore_app. USE THEM to fill any missing information before generating or saving cases. Do not leave placeholders like "pendiente confirmar" or generic selectors when you can look it up.
+- Missing API endpoints, IDs, query params, or payload structure → call discover_api_contract with start_paths relevant to the ticket. It logs into the app with QA creds, navigates, and captures real network calls. Rewrite cases from matches/suggestedEnv only.
+- Missing selectors, field labels, button text, or navigation paths → call suggest_selectors with the relevant page URL (and optional hint like "botón guardar" or "formulario de alta"). It opens the page and returns real data-testid, role, name, and id selectors. Many apps keep a hamburger/sidenav even on desktop — the executor opens it when a click target is not on screen; cases can still say "Hacer click en 'F12'".
+- Unsure which pages exist, what the app looks like, or what's already covered → call explore_app to crawl the app and compare against saved cases.
+- After a run fails due to bad selectors or missing elements → call suggest_selectors on the failing page, fix the cases with real selectors, save, and re-run. Do not guess different selectors.
+- Chain these tools: e.g. fetch_ticket → analyze_ticket → discover_api_contract (to get real IDs) → suggest_selectors (to get real selectors) → fix cases with discovered data → save_test_cases. The goal is cases built entirely from real observed data, not from assumptions.
+- If discovery tools return no useful data (page did not load, no matching network calls), tell the user what you tried and what's still missing — do not silently fall back to placeholders.
 - If user pastes free text (not a ticket key): treat it as a feature description using fetch_ticket with pasted_summary + pasted_description.
 - Use list_recent_runs to give context on what was already tested.
 - Use lists. If the ticket is ambiguous, ask before generating cases.
@@ -116,9 +132,10 @@ Rules:
 - If the user names multiple Jira tickets in one request: process EVERY ticket (fetch/analyze/export as asked). Do not collapse to the last key. Shared coverage applies to all. For Xray: one CSV fence per ticket (never merge Issue Ids).
 - Never ask for coverage AFTER already delivering cases, a CSV, or Playwright scripts.`;
 
-const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, save_test_cases, export_xray_csv, generate_playwright_specs, discover_api_contract, enqueue_run, get_run_status, publish_results_to_jira, list_projects, set_active_project, list_test_cases, list_recent_runs.
+const DEFAULT_CHAT_INSTRUCTIONS_COMPACT = `Tools: fetch_ticket, analyze_ticket, save_test_cases, export_xray_csv, generate_playwright_specs, discover_api_contract, enqueue_run, get_run_status, publish_results_to_jira, jira_get_comments, jira_post_comment, jira_search, list_projects, set_active_project, list_test_cases, list_recent_runs.
 
 Order: fetch → if creating cases / Xray without coverage, ASK briefly (UI has coverage buttons; do not list options to type) → analyze_ticket(coverage) → (Xray: export_xray_csv with strategy) → save_test_cases if asked. Playwright scripts: generate_playwright_specs (fence \`\`\`typescript with returned content). Missing API IDs/params: discover_api_contract then rewrite cases from matches/suggestedEnv (never invent). Playwright run: enqueue_run (also writes .spec.ts if missing) → get_run_status. Xray = export_xray_csv; Playwright scripts = .spec.ts.
+Sparse ticket: if description < 3 sentences and no AC → enrich BEFORE analyzing: jira_search for related tickets (epic, siblings), fetch_ticket on best hits, explore_app/suggest_selectors on the real page, discover_api_contract if BE. Use discovered info for precise cases.
 
 Rules:
 - TC-01/TC-02 are case ids, not Jira keys. Use the real ticket key from the thread.
@@ -128,7 +145,8 @@ Rules:
 - Never invent Xray CSV — only paste export_xray_csv.csv in a \`\`\`csv fence.
 - Creating cases or Xray CSV without coverage (happy/unhappy/corner/all) → ASK briefly first (no typed option list). Do not call analyze_ticket yet. Do not invent coverage=all. Short answers like "todos" count. If analyze_ticket returns coverage_required, ask the same way.
 - Pure analysis / "qué entendés" → fetch_ticket and present understanding.text (BE/API vs UI; modos/validaciones; notas de comentarios del dev); do NOT ask coverage.
-- BE/API cases → Playwright request specs/runs; auth from project QA creds when running via Qatin. NEVER ask the user for API_TOKEN / email / password if qa_creds=sí. Missing IDs/filter params → discover_api_contract; rewrite from matches only. Xray CSV still via export_xray_csv when asked.
+- BE/API cases → Playwright request specs/runs; auth from project QA creds when running via Qatin. NEVER ask the user for API_TOKEN / email / password if qa_creds=sí. Xray CSV still via export_xray_csv when asked.
+- Proactive discovery — NEVER leave gaps, NEVER invent: use discover_api_contract (missing API IDs/endpoints/params), suggest_selectors (missing selectors/labels/buttons), explore_app (unknown pages/coverage gaps). Chain them before saving cases. After a failed run with bad selectors → suggest_selectors on the failing page, fix, save, re-run. If discovery returns nothing useful, tell the user what you tried — do not silently use placeholders. Desktop hamburger/sidenav: executor opens it when the click target is hidden.
 - After delivering cases/CSV/scripts → do NOT ask coverage again.
 - After enqueue_run or get_run_status → report queue/status + followPath. Do NOT ask coverage. If screenshots[] is empty, say there are no captures yet (do not invent old ones).
 - User asks for Playwright scripts only → generate_playwright_specs (save cases first if needed).
@@ -139,6 +157,8 @@ Rules:
 - save_test_cases returns cases_lint_failed → fix findings; do not claim saved.
 - User asks how a run is going / status / results → call get_run_status (latest live run). NEVER enqueue_run for that.
 - Never publish to Jira without an explicit yes from the user; then publish_results_to_jira with confirmed=true.
+- Never post a Jira comment (jira_post_comment) without an explicit yes. Ask first.
+- jira_get_comments reads dev notes from a ticket without re-fetching everything.
 - If config is missing: say what and where to fix it.
 - Include screenshot URLs (/screenshots/...) only when returned for THIS run.
 - Never mention tool names to the user. After a run is queued, point them to Ejecuciones with followPath (/runs?id=N).
@@ -2226,7 +2246,7 @@ export async function runQaChatTurn(opts: {
       session_id: sessionId,
       role: 'assistant',
       content: msg,
-      ...(usage ? { meta: { usage } } : {}),
+      meta: { error: true, ...(usage ? { usage } : {}) },
     });
     onEvent({ type: 'token', text: msg });
     onEvent({ type: 'error', error: msg });
