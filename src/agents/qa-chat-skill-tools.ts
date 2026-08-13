@@ -19,6 +19,7 @@ import {
 import { ToolDefinition } from '../llm';
 import { getScreenshotsDir, isPathInside } from '../paths';
 import { logger } from '../utils/logger';
+import { lintTestCases } from './test-case-lint';
 
 function screenshotPublicUrl(filePath: string): string {
   const screenshotsRoot = getScreenshotsDir();
@@ -101,11 +102,6 @@ export const SKILL_CHAT_TOOLS: ToolDefinition[] = [
   },
 ];
 
-const FRAGILE_SELECTOR =
-  /nth-child|nth-of-type|>\s*div\s*>|\/html|body\s*>/i;
-const AMBIGUOUS_STEP =
-  /^(check|verify|assert|validar|verificar|comprobar)\b/i;
-
 export async function runSkillTool(
   name: string,
   args: Record<string, unknown>,
@@ -160,65 +156,31 @@ function reviewTestPlan(
     };
   }
 
-  const findings: Array<{
-    severity: 'high' | 'medium' | 'low';
-    type: string;
-    case_key?: string;
-    message: string;
-  }> = [];
+  const lint = lintTestCases(
+    cases.map((c) => ({
+      case_key: c.case_key,
+      description: c.description,
+      steps: c.steps,
+      expectedResults: c.expectedResults,
+      urls: c.urls,
+      selectors: c.selectors,
+    }))
+  );
 
-  let fragile = 0;
-  let ambiguous = 0;
-  let emptySteps = 0;
   let hasNegative = false;
-
   for (const c of cases) {
-    const steps = c.steps || [];
-    const selectors = c.selectors || [];
     const desc = (c.description || '').toLowerCase();
-
     if (
-      /negativ|error|invalid|fail|edge|vac[ií]o|sin |sin_/.test(desc) ||
-      /negativ|error|invalid/.test(c.case_key.toLowerCase())
+      /negativ|error|invalid|fail|edge|vac[ií]o|unhappy|corner|\[unhappy\]|\[corner\]/.test(
+        desc
+      ) ||
+      /negativ|error|invalid|unhappy|corner/.test(c.case_key.toLowerCase())
     ) {
       hasNegative = true;
     }
-
-    if (!steps.length) {
-      emptySteps++;
-      findings.push({
-        severity: 'high',
-        type: 'steps',
-        case_key: c.case_key,
-        message: 'Caso sin pasos',
-      });
-    }
-
-    for (const step of steps) {
-      if (AMBIGUOUS_STEP.test(step.trim()) && !/['"`]/.test(step)) {
-        ambiguous++;
-        findings.push({
-          severity: 'medium',
-          type: 'ambiguous_step',
-          case_key: c.case_key,
-          message: `Paso ambiguo (sin texto/selector concreto): "${step.slice(0, 80)}"`,
-        });
-      }
-    }
-
-    for (const sel of selectors) {
-      if (FRAGILE_SELECTOR.test(sel)) {
-        fragile++;
-        findings.push({
-          severity: 'medium',
-          type: 'fragile_selector',
-          case_key: c.case_key,
-          message: `Selector frágil: ${sel}`,
-        });
-      }
-    }
   }
 
+  const findings = [...lint.findings];
   if (!hasNegative && cases.length >= 2) {
     findings.push({
       severity: 'medium',
@@ -234,7 +196,10 @@ function reviewTestPlan(
   return {
     ticket_key: ticketKey || null,
     casesReviewed: cases.length,
-    stats: { fragileSelectors: fragile, ambiguousSteps: ambiguous, emptySteps },
+    stats: {
+      ...lint.stats,
+      fragileSelectors: lint.stats.fragileSelectors,
+    },
     findings: findings.slice(0, 40),
     readyToEnqueue,
     summary: readyToEnqueue

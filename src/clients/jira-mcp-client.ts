@@ -168,9 +168,20 @@ export class JiraMcpClient {
   }
 
   async getIssue(issueKey: string): Promise<JiraIssue> {
-    return this.callMcp('jira_get_issue', { issueKey }, () =>
+    const issue = await this.callMcp('jira_get_issue', { issueKey }, () =>
       this.direct.getIssue(issueKey)
     );
+    // MCP path may omit comments; always enrich — devs often leave how-to-test notes there.
+    const hasComments = Array.isArray(issue?.fields?.comment?.comments);
+    if (!hasComments) {
+      try {
+        issue.fields = issue.fields || ({} as JiraIssue['fields']);
+        issue.fields.comment = await this.direct.getIssueComments(issueKey);
+      } catch (error) {
+        logger.warn(`Could not enrich ${issueKey} with comments:`, error);
+      }
+    }
+    return issue;
   }
 
   async searchIssues(jql: string, maxResults = 50): Promise<any> {

@@ -110,7 +110,8 @@ export const PROVIDER_DEFAULTS: Record<
   { model: string; baseUrl?: string; label: string }
 > = {
   openai: {
-    model: 'gpt-4-turbo-preview',
+    model: 'gpt-5.6-terra',
+    baseUrl: 'https://api.openai.com/v1',
     label: 'OpenAI',
   },
   deepseek: {
@@ -119,7 +120,7 @@ export const PROVIDER_DEFAULTS: Record<
     label: 'DeepSeek',
   },
   claude: {
-    model: 'claude-sonnet-4-20250514',
+    model: 'claude-sonnet-5',
     label: 'Claude (Anthropic)',
   },
   'openai-compatible': {
@@ -157,6 +158,28 @@ export function getPromptTier(provider: LlmProvider, model?: string): PromptTier
 
   // Known cloud providers are always full-tier
   return 'full';
+}
+
+/**
+ * Custom instructions replace the tier default. On compact models, if the
+ * custom text is much longer than the compact default, append a short
+ * reminder so small models stay focused.
+ */
+export function resolveAgentInstructions(
+  custom: string | null | undefined,
+  tierDefaults: string,
+  tier: PromptTier
+): string {
+  const trimmed = (custom || '').trim();
+  if (!trimmed) return tierDefaults;
+
+  if (tier === 'compact' && trimmed.length > tierDefaults.length * 1.25) {
+    return `${trimmed}
+
+COMPACT MODE (active model is small): Prefer fewer scenarios, shorter descriptions, and essential rules only. Do not invent deep links — use {{BASE_URL}} paths from the ticket or click by visible label.`;
+  }
+
+  return trimmed;
 }
 
 /** Settings keys for a saved per-provider model/base URL profile. */

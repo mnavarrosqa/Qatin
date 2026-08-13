@@ -1,0 +1,47 @@
+---
+description: Playbook for testing BE/API tickets (payload contracts, modes vs flags, discovery before runs)
+alwaysApply: true
+---
+
+# BE / API testing (Qatin)
+
+Use this for endpoint tickets (create/update completa, multi-step UI collapsed into one POST), not only a single Jira key.
+
+## Before executing
+
+1. Read the Jira ticket **and its comments** — developers often leave how-to-test notes (endpoint, payload shape, sample IDs, env, caveats). Prefer those over invented assumptions.
+2. Discover real contract: DevTools Network on the UI action, or Swagger/OpenAPI, or ask the dev (or reuse what they already wrote in comments).
+3. Capture: absolute URL, method, auth header, content-type, **exact JSON body**, status codes.
+4. Do not treat project `base_url` (often `/v2/login`) as the API host. Prefer `API_BASE_URL` + path from discovery. Set `API_TOKEN` when needed.
+5. A **405/404 with empty body** is almost always wrong URL/base — fix config before rewriting cases.
+6. **Never invent** method, path, resource IDs, query/body filters, or sample names. If the ticket uses `{id}`, keep placeholders / `{{ACOPIO_ID}}` / `{{CAMPANIA_ID}}` until Network/QA/comments provides real values. If filters are only described in the FE, mark params as "pendiente confirmar en Network".
+7. Prefer Qatin `discover_api_contract` (QA login + SPA Network + JWT claims) before asking the user to paste DevTools captures.
+
+## Payload mental model
+
+- UI wizard steps (Facturación → Insumos → Distribución) usually become **one request body**, not three calls.
+- UI actions ("Liquidar total…", "Distribuir equitativamente", "Saldo restante…") are **front calculations**. The API should receive **explicit rows** (e.g. `distribucion[]` with `destinoId` + `cantidad`), not booleans mirroring button names.
+- Special entities named in AC (e.g. Agroinsumos) are usually a normal `destinoId` / catalog row, not a magic `tipoDestino` unless the contract says so.
+- Mark uncertain nesting (`distribucion` inside each insumo vs root array) as TBD until Network confirms.
+
+## Case design pattern
+
+| Layer | What to cover |
+|-------|----------------|
+| Happy | One case per distinct CA success mode; payload with concrete quoted IDs/amounts |
+| Unhappy | Incomplete sum, missing distribution, missing required blocks → expect 4xx + message |
+| Auth | No/expired token → 401 |
+| State | Resource ends in the non-draft/non-pending state the CA requires |
+| Derived fields | Totals/margins asserted when the CA requires them |
+| Contract doc | If CA asks to document payload, include field expectations or a dedicated scenario |
+
+## Writing steps (for analyzer / Xray / Playwright API)
+
+Prefer:
+
+1. `Preparar payload` with **JSON-shaped field paths and values in quotes** (not "datos válidos").
+2. `Enviar METHOD` to the **discovered** path.
+3. `Verificar status HTTP '…'`.
+4. `Verificar en el body` / persistencia / estado.
+
+Avoid inventing UI flags in the payload (`liquidarTotalParaAgroinsumos=true`). Describe the mode in the case title; put the **resulting distribution numbers** in the payload step.

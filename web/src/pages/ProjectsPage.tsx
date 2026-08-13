@@ -8,6 +8,7 @@ import {
   type LlmProvider,
 } from '../api';
 import { Icon } from '../components/Icon';
+import { LlmModelFields } from '../components/LlmModelFields';
 
 const emptyForm: ProjectInput = {
   name: '',
@@ -144,9 +145,6 @@ export function ProjectsPage() {
   }
 
   const selectedProvider = form.llm_provider;
-  const selectedMeta = selectedProvider
-    ? providers.find((p) => p.id === selectedProvider)
-    : undefined;
 
   return (
     <>
@@ -247,78 +245,57 @@ export function ProjectsPage() {
             </div>
           </div>
 
-          <div className="grid-2">
-            <div className="field">
-              <label htmlFor="llm_provider">Proveedor de LLM</label>
-              <select
-                id="llm_provider"
-                value={form.llm_provider || ''}
-                onChange={(e) => {
-                  const value = (e.target.value || null) as LlmProvider | null;
-                  setTestMsg(null);
-                  setForm({
-                    ...form,
-                    llm_provider: value,
-                    llm_model: '',
-                    llm_base_url: '',
-                  });
-                }}
-              >
-                <option value="">Usar el default global</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.label}
-                    {p.configured ? ' (configurado)' : ''}
-                  </option>
-                ))}
-              </select>
-              <p className="hint">
-                {selectedProvider
-                  ? 'Dejá modelo y URL vacíos para usar los de Configuración. Completalos solo si este proyecto usa otro modelo.'
-                  : 'Sin override: el chat usa el proveedor y modelo de Configuración.'}
-              </p>
-            </div>
-            <div className="field">
-              <label htmlFor="llm_model">Modelo</label>
-              <input
-                id="llm_model"
-                value={form.llm_model || ''}
-                onChange={(e) => setForm({ ...form, llm_model: e.target.value })}
-                placeholder={
-                  selectedMeta?.configuredModel ||
-                  selectedMeta?.defaultModel ||
-                  'Modelo por defecto de Configuración'
-                }
-              />
-            </div>
+          <div className="field">
+            <label htmlFor="llm_provider">Proveedor de LLM</label>
+            <select
+              id="llm_provider"
+              value={form.llm_provider || ''}
+              onChange={(e) => {
+                const value = (e.target.value || null) as LlmProvider | null;
+                setTestMsg(null);
+                setForm({
+                  ...form,
+                  llm_provider: value,
+                  llm_model: '',
+                  llm_base_url: '',
+                });
+              }}
+            >
+              <option value="">Usar el default global</option>
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                  {p.configured ? ' (configurado)' : ''}
+                </option>
+              ))}
+            </select>
+            <p className="hint">
+              {selectedProvider
+                ? 'Dejá modelo y URL vacíos para usar los de Configuración. Completalos solo si este proyecto usa otro modelo.'
+                : 'Sin override: el chat usa el proveedor y modelo de Configuración.'}
+            </p>
           </div>
 
-          {(selectedProvider === 'openai-compatible' ||
-            selectedProvider === 'deepseek' ||
-            selectedProvider === 'ollama') && (
-            <div className="field">
-              <label htmlFor="llm_base_url">
-                {selectedProvider === 'ollama'
-                  ? 'URL base de Ollama'
-                  : 'URL base del LLM'}
-              </label>
-              <input
-                id="llm_base_url"
-                value={form.llm_base_url || ''}
-                onChange={(e) =>
-                  setForm({ ...form, llm_base_url: e.target.value })
-                }
-                placeholder={
-                  selectedMeta?.configuredBaseUrl ||
-                  selectedMeta?.defaultBaseUrl ||
-                  (selectedProvider === 'deepseek'
-                    ? 'https://api.deepseek.com'
-                    : selectedProvider === 'ollama'
-                      ? 'http://tu-host-ollama:11434/v1'
-                      : 'https://tu-endpoint-compatible/v1')
-                }
-              />
-            </div>
+          {selectedProvider && (
+            <LlmModelFields
+              providerId={selectedProvider}
+              providers={providers}
+              model={form.llm_model || ''}
+              baseUrl={form.llm_base_url || ''}
+              onModelChange={(value) =>
+                setForm({ ...form, llm_model: value })
+              }
+              onBaseUrlChange={(value) =>
+                setForm({ ...form, llm_base_url: value })
+              }
+              allowEmpty
+              showBaseUrl={
+                selectedProvider === 'openai-compatible' ||
+                selectedProvider === 'deepseek' ||
+                selectedProvider === 'ollama' ||
+                selectedProvider === 'openai'
+              }
+            />
           )}
 
           {error && <p className="error">{error}</p>}

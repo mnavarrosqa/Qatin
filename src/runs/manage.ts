@@ -1,15 +1,23 @@
 import fs from 'fs';
 import path from 'path';
 import {
+  createTestRun,
   deleteTestRun,
   getDb,
+  getProject,
+  getProjectCredentials,
   getTestRun,
   updateTestRun,
   type TestRunRow,
 } from '../db';
+import type { LlmProvider } from '../llm';
 import { testQueue } from '../queue';
 import { getScreenshotsDir, isPathInside } from '../paths';
 import { logger } from '../utils/logger';
+import {
+  buildStrategyFromSavedCases,
+  CASES_REQUIRED_ERROR,
+} from './strategy-from-cases';
 
 export class RunCancelledError extends Error {
   constructor(message = 'Ejecución cancelada') {
@@ -118,6 +126,234 @@ export async function cancelTestRun(
   });
   await cancelQueueJob(run.job_id);
   return { run: getTestRun(id) };
+}
+
+/**
+ * Queue a new run with the same ticket/paste payload as a finished one.
+ */
+export async function rerunTestRun(
+  id: number
+): Promise<{ run: TestRunRow | null; sourceRun: TestRunRow | null; error?: string }> {
+  const source = getTestRun(id);
+  if (!source) return { run: null, sourceRun: null, error: 'Run no encontrado' };
+  if (!isTerminalStatus(source.status)) {
+    return {
+      run: null,
+      sourceRun: source,
+      error: 'La ejecución todavía está en curso. Frenala primero.',
+    };
+  }
+  if (!source.project_id) {
+    return { run: null, sourceRun: source, error: 'La ejecución no tiene proyecto' };
+  }
+
+  const project = getProject(source.project_id);
+  if (!project) {
+    return { run: null, sourceRun: source, error: 'Proyecto no encontrado' };
+  }
+
+  let ticketId = source.ticket_id;
+  if (source.source === 'paste') {
+    if (!source.pasted_summary || !source.pasted_description) {
+      return {
+        run: null,
+        sourceRun: source,
+        error: 'Faltan datos del ticket pegado para re-ejecutar',
+      };
+    }
+    ticketId = `PASTE-${Date.now()}`;
+  } else if (!ticketId) {
+    return {
+      run: null,
+      sourceRun: source,
+      error: 'La ejecución no tiene ticket',
+    };
+  }
+
+  const credentials = getProjectCredentials(project);
+  const llmProvider = (project.llm_provider as LlmProvider | null) || undefined;
+
+  const strategy = buildStrategyFromSavedCases(
+    source.project_id,
+    source.ticket_id || ticketId
+  );
+  if (!strategy) {
+    return {
+      run: null,
+      sourceRun: source,
+      error: CASES_REQUIRED_ERROR,
+    };
+  }
+
+  const run = createTestRun({
+    project_id: source.project_id,
+    source: source.source,
+    ticket_id: ticketId,
+    pasted_summary: source.pasted_summary,
+    pasted_description: source.pasted_description,
+    status: 'queued',
+  });
+
+  const job = await testQueue.add('test-ticket', {
+    ticketId,
+    projectId: source.project_id,
+    runId: run.id,
+    source: source.source,
+    pastedTicket:
+      source.source === 'paste'
+        ? {
+            summary: source.pasted_summary || undefined,
+            description: source.pasted_description || undefined,
+          }
+        : undefined,
+    strategy,
+    projectConfig: {
+      baseUrl: project.base_url || process.env.APP_BASE_URL,
+      stagingUrl: project.staging_url || process.env.APP_STAGING_URL,
+      testUserEmail: credentials.email || process.env.TEST_USER_EMAIL,
+      testUserPassword: credentials.password || process.env.TEST_USER_PASSWORD,
+      llmProvider,
+      llmModel: project.llm_model || undefined,
+      llmBaseUrl: project.llm_base_url || undefined,
+      jiraUrl: project.jira_url || undefined,
+      jiraProjectKey: project.jira_project_key || undefined,
+    },
+    timestamp: Date.now(),
+    requestedBy: 'rerun',
+    triggeredBy: `rerun:${id}`,
+  });
+
+  updateTestRun(run.id, { job_id: String(job.id), status: 'queued' });
+  logger.info(`Re-queued run ${run.id} from ${id} as job ${job.id}`);
+  return { run: getTestRun(run.id), sourceRun: source };
+}
+
+/**
+ * Publish a finished Jira-sourced run's results to the ticket (comment, screenshots, label, transition).
+ */
+export async function publishRunToJira(
+  id: number
+): Promise<{ run: TestRunRow | null; error?: string }> {
+  const run = getTestRun(id);
+  if (!run) return { run: null, error: 'Run no encontrado' };
+
+  if (run.source !== 'jira') {
+    return { run, error: 'Solo se pueden publicar resultados de tickets Jira' };
+  }
+  if (!run.ticket_id) {
+    return { run, error: 'La ejecución no tiene ticket' };
+  }
+  if (run.status !== 'completed' && run.status !== 'failed') {
+    return {
+      run,
+      error: 'La ejecución todavía no terminó. Esperá a que complete o falle.',
+    };
+  }
+  if (run.jira_posted_at) {
+    return { run, error: 'Los resultados ya se publicaron en Jira' };
+  }
+  if (!run.result_json) {
+    return { run, error: 'No hay resultados para publicar' };
+  }
+
+  let parsed: {
+    success?: boolean;
+    summary?: {
+      passed?: boolean;
+      total?: number;
+      successful?: number;
+      failed?: number;
+      totalDuration?: number;
+    };
+    details?: string;
+    screenshots?: Array<{ name?: string; path?: string }>;
+    error?: string;
+    stack?: string;
+  };
+  try {
+    parsed = JSON.parse(run.result_json);
+  } catch {
+    return { run, error: 'Los resultados están corruptos' };
+  }
+
+  const summary = parsed.summary;
+  const passed = Boolean(summary?.passed ?? parsed.success);
+  const totalTests = summary?.total ?? 1;
+  const passedTests = summary?.successful ?? (passed ? 1 : 0);
+  const failedTests = summary?.failed ?? (passed ? 0 : 1);
+  const executionTime = summary?.totalDuration ?? 0;
+  const details =
+    typeof parsed.details === 'string'
+      ? parsed.details
+      : parsed.error
+        ? `Error executing automated tests:\n${parsed.error}${
+            parsed.stack ? `\n\nStack trace:\n${parsed.stack}` : ''
+          }`
+        : 'Sin detalle';
+
+  const screenshots: Array<{ name: string; path: string; buffer: Buffer }> = [];
+  const screenshotsRoot = getScreenshotsDir();
+  for (const shot of parsed.screenshots || []) {
+    if (!shot.path) continue;
+    const abs = path.resolve(shot.path);
+    if (!isPathInside(screenshotsRoot, abs) || !fs.existsSync(abs)) continue;
+    try {
+      screenshots.push({
+        name: shot.name || path.basename(abs),
+        path: abs,
+        buffer: fs.readFileSync(abs),
+      });
+    } catch (err) {
+      logger.warn(`Skipping screenshot ${abs}:`, err);
+    }
+  }
+
+  const { getJiraClient } = await import('../clients/jira-mcp-client');
+  const jiraClient = await getJiraClient();
+
+  try {
+    await jiraClient.postTestResults(run.ticket_id, {
+      passed,
+      totalTests,
+      passedTests,
+      failedTests,
+      screenshots,
+      details,
+      executionTime,
+    });
+
+    if (parsed.error && !summary) {
+      await jiraClient.addLabel(run.ticket_id, 'qa-error');
+    } else {
+      await jiraClient.addLabel(
+        run.ticket_id,
+        passed ? 'qa-passed' : 'qa-failed'
+      );
+      try {
+        await jiraClient.transitionIssue(
+          run.ticket_id,
+          passed ? 'QA Approved' : 'QA Failed'
+        );
+      } catch (transitionErr) {
+        logger.warn(
+          `Published results but could not transition ${run.ticket_id}:`,
+          transitionErr
+        );
+      }
+    }
+  } catch (err: any) {
+    logger.error(`Failed to publish run ${id} to Jira:`, err);
+    return {
+      run,
+      error: err?.message || 'No se pudieron publicar los resultados en Jira',
+    };
+  }
+
+  const updated = updateTestRun(id, {
+    jira_posted_at: new Date().toISOString(),
+  });
+  logger.info(`Published run ${id} results to ${run.ticket_id}`);
+  return { run: updated };
 }
 
 function unlinkQuiet(filePath: string): void {

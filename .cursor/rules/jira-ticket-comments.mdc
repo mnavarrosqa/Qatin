@@ -1,0 +1,19 @@
+---
+description: Always read Jira ticket comments — developers often leave how-to-test guidance there
+alwaysApply: true
+---
+
+# Jira ticket comments (Qatin)
+
+Whenever any agent reads or analyzes a Jira ticket, **include the ticket comments**, not only summary/description.
+
+## Why
+
+Developers frequently leave testing guidance in comments: endpoints, payload shape, sample IDs, environment, caveats, and “how to verify”.
+
+## Rules
+
+1. Prefer concrete how-to-test notes from comments over invented assumptions.
+2. Use comment facts for surface detection, acceptance criteria mining, case design, and explanations to the user.
+3. If comments conflict with the description, call out the conflict; do not silently ignore the comment.
+4. Paste-mode tickets have no comments — that is fine; do not invent them.

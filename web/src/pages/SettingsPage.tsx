@@ -9,6 +9,7 @@ import {
   type LlmProvider,
 } from '../api';
 import { Icon, type IconName } from '../components/Icon';
+import { LlmModelFields } from '../components/LlmModelFields';
 
 type SettingsTab = 'model' | 'keys' | 'jira' | 'agents' | 'plugins' | 'skills';
 type PluginBusyAction = 'install' | 'uninstall' | 'config';
@@ -137,6 +138,16 @@ export function SettingsPage() {
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [jiraTesting, setJiraTesting] = useState(false);
+  const [jiraTestMsg, setJiraTestMsg] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+  const [xrayTesting, setXrayTesting] = useState(false);
+  const [xrayTestMsg, setXrayTestMsg] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const [promptDefaults, setPromptDefaults] = useState<{
     agent_chat_instructions: string;
     agent_analyzer_instructions: string;
@@ -193,6 +204,8 @@ export function SettingsPage() {
     setSettings((prev) => ({ ...prev, [key]: value }));
     setSaved(false);
     setTestMsg(null);
+    setJiraTestMsg(null);
+    setXrayTestMsg(null);
   }
 
   async function onSubmit(e: FormEvent) {
@@ -256,9 +269,16 @@ export function SettingsPage() {
       const payload: Record<string, string> = {
         jira_url: settings.jira_url || '',
         jira_email: settings.jira_email || '',
+        xray_client_id: settings.xray_client_id || '',
       };
       if (settings.jira_api_token && settings.jira_api_token !== '••••••••') {
         payload.jira_api_token = settings.jira_api_token;
+      }
+      if (
+        settings.xray_client_secret &&
+        settings.xray_client_secret !== '••••••••'
+      ) {
+        payload.xray_client_secret = settings.xray_client_secret;
       }
       const res = await api.updateSettings(payload);
       setSettings(res.settings);
@@ -267,6 +287,60 @@ export function SettingsPage() {
       setMcpError(err.message);
     } finally {
       setMcpBusy(false);
+    }
+  }
+
+  async function testJira() {
+    setMcpError('');
+    setJiraTestMsg(null);
+    setJiraTesting(true);
+    try {
+      const result = await api.testJiraConnection({
+        jira_url: settings.jira_url || undefined,
+        jira_email: settings.jira_email || undefined,
+        jira_api_token:
+          settings.jira_api_token && settings.jira_api_token !== '••••••••'
+            ? settings.jira_api_token
+            : undefined,
+      });
+      setJiraTestMsg({
+        ok: true,
+        text: `Conectado como ${result.displayName} (${result.latencyMs}ms)`,
+      });
+    } catch (err: any) {
+      setJiraTestMsg({
+        ok: false,
+        text: err.message || 'Falló la prueba de conexión a Jira',
+      });
+    } finally {
+      setJiraTesting(false);
+    }
+  }
+
+  async function testXray() {
+    setMcpError('');
+    setXrayTestMsg(null);
+    setXrayTesting(true);
+    try {
+      const result = await api.testXrayConnection({
+        xray_client_id: settings.xray_client_id || undefined,
+        xray_client_secret:
+          settings.xray_client_secret &&
+          settings.xray_client_secret !== '••••••••'
+            ? settings.xray_client_secret
+            : undefined,
+      });
+      setXrayTestMsg({
+        ok: true,
+        text: `Xray autenticado (${result.latencyMs}ms)`,
+      });
+    } catch (err: any) {
+      setXrayTestMsg({
+        ok: false,
+        text: err.message || 'Falló la prueba de conexión a Xray',
+      });
+    } finally {
+      setXrayTesting(false);
     }
   }
 
@@ -465,6 +539,8 @@ export function SettingsPage() {
               setSkillError('');
               setSkillFlash(null);
               setTestMsg(null);
+              setJiraTestMsg(null);
+              setXrayTestMsg(null);
             }}
           >
             <Icon name={item.icon} size={14} />
@@ -481,69 +557,41 @@ export function SettingsPage() {
               sobreescribe.
             </p>
             <form onSubmit={onSubmit}>
-              <div className="grid-2">
-                <div className="field">
-                  <label htmlFor="llm_provider">Proveedor por defecto</label>
-                  <select
-                    id="llm_provider"
-                    value={settings.llm_provider || 'openai'}
-                    onChange={(e) => {
-                      const id = e.target.value;
-                      const meta = providers.find((p) => p.id === id);
-                      set('llm_provider', id);
-                      set(
-                        'llm_model',
-                        meta?.configuredModel || meta?.defaultModel || ''
-                      );
-                      set(
-                        'llm_base_url',
-                        meta?.configuredBaseUrl || meta?.defaultBaseUrl || ''
-                      );
-                    }}
-                  >
-                    {providers.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div className="field">
-                  <label htmlFor="llm_model">Modelo por defecto</label>
-                  <input
-                    id="llm_model"
-                    value={settings.llm_model || ''}
-                    onChange={(e) => set('llm_model', e.target.value)}
-                    placeholder="gpt-4-turbo-preview"
-                  />
-                </div>
+              <div className="field">
+                <label htmlFor="llm_provider">Proveedor por defecto</label>
+                <select
+                  id="llm_provider"
+                  value={settings.llm_provider || 'openai'}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    const meta = providers.find((p) => p.id === id);
+                    set('llm_provider', id);
+                    set(
+                      'llm_model',
+                      meta?.configuredModel || meta?.defaultModel || ''
+                    );
+                    set(
+                      'llm_base_url',
+                      meta?.configuredBaseUrl || meta?.defaultBaseUrl || ''
+                    );
+                  }}
+                >
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
               </div>
 
-              <div className="field">
-                <label htmlFor="llm_base_url">
-                  {settings.llm_provider === 'ollama'
-                    ? 'URL base de Ollama'
-                    : 'URL base compatible / custom'}
-                </label>
-                <input
-                  id="llm_base_url"
-                  value={settings.llm_base_url || ''}
-                  onChange={(e) => set('llm_base_url', e.target.value)}
-                  placeholder={
-                    settings.llm_provider === 'ollama'
-                      ? 'http://tu-host-ollama:11434/v1'
-                      : 'https://api.deepseek.com o endpoint custom /v1'
-                  }
-                />
-                {settings.llm_provider === 'ollama' && (
-                  <p className="hint">
-                    No hace falta API key. Usá la base compatible con OpenAI,
-                    por ejemplo <code>http://192.168.x.x:11434/v1</code> — no{' '}
-                    <code>/api/chat</code>. El modelo ya tiene que estar
-                    descargado (ej. <code>llama3.2</code>).
-                  </p>
-                )}
-              </div>
+              <LlmModelFields
+                providerId={settings.llm_provider || 'openai'}
+                providers={providers}
+                model={settings.llm_model || ''}
+                baseUrl={settings.llm_base_url || ''}
+                onModelChange={(value) => set('llm_model', value)}
+                onBaseUrlChange={(value) => set('llm_base_url', value)}
+              />
 
               {error && <p className="error">{error}</p>}
               {testMsg && (
@@ -654,10 +702,11 @@ export function SettingsPage() {
         {tab === 'jira' && (
           <div role="tabpanel" id="panel-jira" aria-labelledby="tab-jira">
             <p className="panel-lead">
-              Cargá tus credenciales de Jira Cloud y después conectá MCP. Se
-              usan las mismas para traer y actualizar tickets.
+              Credenciales de Jira Cloud (tickets) y de Xray Cloud (API Keys).
+              Después podés conectar MCP con las mismas de Jira.
             </p>
             <form onSubmit={saveJira}>
+              <h2 className="settings-subhead">Jira</h2>
               <div className="field">
                 <label htmlFor="jira_url">URL de Jira</label>
                 <input
@@ -695,18 +744,24 @@ export function SettingsPage() {
                   />
                 </div>
               </div>
-              {mcpError && <p className="error">{mcpError}</p>}
-              {saved && tab === 'jira' && (
-                <p className="saved-msg">Guardado.</p>
+              {jiraTestMsg && (
+                <p className={jiraTestMsg.ok ? 'saved-msg' : 'error'}>
+                  {jiraTestMsg.text}
+                </p>
               )}
               <div className="actions">
-                <button className="btn btn-ghost" type="submit" disabled={mcpBusy}>
-                  Guardar credenciales
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  disabled={jiraTesting || mcpBusy}
+                  onClick={() => void testJira()}
+                >
+                  {jiraTesting ? 'Probando…' : 'Probar conexión'}
                 </button>
                 <button
                   className={mcpConnected ? 'btn btn-ghost' : 'btn'}
                   type="button"
-                  disabled={mcpBusy}
+                  disabled={mcpBusy || jiraTesting}
                   onClick={() => void toggleMcp()}
                 >
                   {mcpConnected ? 'Desconectar MCP' : 'Conectar a Jira MCP'}
@@ -714,6 +769,65 @@ export function SettingsPage() {
                 <span className={`badge ${mcpConnected ? 'ok' : 'warn'}`}>
                   {mcpConnected ? 'conectado' : 'apagado'}
                 </span>
+              </div>
+
+              <h2 className="settings-subhead">Xray</h2>
+              <p className="hint">
+                API Keys de Xray Cloud (Apps → Xray → API Keys). Se usan para
+                autenticar contra la API de Xray.
+              </p>
+              <div className="grid-2">
+                <div className="field">
+                  <label htmlFor="xray_client_id">Client ID</label>
+                  <input
+                    id="xray_client_id"
+                    value={settings.xray_client_id || ''}
+                    onChange={(e) => set('xray_client_id', e.target.value)}
+                    placeholder="Client ID de la API Key"
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="xray_client_secret">
+                    Client Secret
+                    {settings.xray_client_secret_set === 'true'
+                      ? ' (seteado)'
+                      : ''}
+                  </label>
+                  <input
+                    id="xray_client_secret"
+                    type="password"
+                    value={settings.xray_client_secret || ''}
+                    onChange={(e) => set('xray_client_secret', e.target.value)}
+                    placeholder="Client Secret de la API Key"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+              {xrayTestMsg && (
+                <p className={xrayTestMsg.ok ? 'saved-msg' : 'error'}>
+                  {xrayTestMsg.text}
+                </p>
+              )}
+              <div className="actions">
+                <button
+                  className="btn btn-ghost"
+                  type="button"
+                  disabled={xrayTesting || mcpBusy}
+                  onClick={() => void testXray()}
+                >
+                  {xrayTesting ? 'Probando…' : 'Probar conexión'}
+                </button>
+              </div>
+
+              {mcpError && <p className="error">{mcpError}</p>}
+              {saved && tab === 'jira' && (
+                <p className="saved-msg">Guardado.</p>
+              )}
+              <div className="actions">
+                <button className="btn" type="submit" disabled={mcpBusy}>
+                  Guardar credenciales
+                </button>
               </div>
             </form>
           </div>
@@ -723,7 +837,9 @@ export function SettingsPage() {
           <div role="tabpanel" id="panel-agents" aria-labelledby="tab-agents">
             <p className="panel-lead">
               Instrucciones que usan los agentes. Podés editarlas para cambiar
-              el comportamiento. Si las borrás completamente, vuelven al default.
+              el comportamiento. Si las borrás completamente, vuelven al default
+              del tier activo. Con modelos chicos (tier compact), si el custom
+              es muy largo se agrega un recordatorio automático de modo compacto.
             </p>
             <p className="hint" style={{ marginBottom: '1rem' }}>
               Tier activo: <strong>{promptTier}</strong>{' '}

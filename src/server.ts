@@ -9,12 +9,17 @@ import { z } from 'zod';
 import { getDb, createTestRun, updateTestRun } from './db';
 import apiRouter from './routes/api';
 import {
+  buildStrategyFromSavedCases,
+  CASES_REQUIRED_ERROR,
+} from './runs/strategy-from-cases';
+import {
   APP_ROOT,
   DATA_DIR,
   ENV_PATH,
   ensureAppDirs,
   getScreenshotsDir,
 } from './paths';
+import { resolveTicketKey } from './utils/ticket-key';
 
 dotenv.config({ path: ENV_PATH });
 ensureAppDirs();
@@ -47,24 +52,35 @@ app.post('/api/test-ticket', async (req, res) => {
 
     const { ticketId, ticketUrl, projectId } = schema.parse(req.body);
 
-    let finalTicketId = ticketId;
-    if (ticketUrl && !ticketId) {
-      const match = ticketUrl.match(/[A-Z][A-Z0-9]+-\d+/i);
-      if (match) {
-        finalTicketId = match[0].toUpperCase();
-      } else {
-        return res.status(400).json({ error: 'Invalid Jira URL format' });
-      }
-    }
-
+    const finalTicketId = resolveTicketKey(ticketId, ticketUrl);
     if (!finalTicketId) {
-      return res.status(400).json({ error: 'Could not determine ticket ID' });
+      return res.status(400).json({
+        error: ticketUrl && !ticketId
+          ? 'Invalid Jira URL format'
+          : 'Could not determine ticket ID',
+      });
     }
 
     logger.info(`Received test request for ticket: ${finalTicketId}`);
 
+    if (!projectId) {
+      return res.status(400).json({
+        error:
+          'Indicá projectId: la ejecución requiere un proyecto con casos guardados',
+        code: 'cases_required',
+      });
+    }
+
+    const strategy = buildStrategyFromSavedCases(projectId, finalTicketId);
+    if (!strategy) {
+      return res.status(400).json({
+        error: CASES_REQUIRED_ERROR,
+        code: 'cases_required',
+      });
+    }
+
     const run = createTestRun({
-      project_id: projectId ?? null,
+      project_id: projectId,
       source: 'jira',
       ticket_id: finalTicketId,
       status: 'queued',
@@ -72,9 +88,10 @@ app.post('/api/test-ticket', async (req, res) => {
 
     const job = await testQueue.add('test-ticket', {
       ticketId: finalTicketId,
-      projectId: projectId ?? null,
+      projectId,
       runId: run.id,
       source: 'jira',
+      strategy,
       timestamp: Date.now(),
       requestedBy: req.ip || 'unknown',
     });
@@ -86,6 +103,7 @@ app.post('/api/test-ticket', async (req, res) => {
       jobId: job.id,
       runId: run.id,
       ticketId: finalTicketId,
+      casesUsed: strategy.scenarios.length,
       message: 'Test job queued successfully',
       status: 'Check job status at /api/job-status/:jobId',
     });

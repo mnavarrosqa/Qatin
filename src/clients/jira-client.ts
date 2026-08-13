@@ -7,6 +7,21 @@ import {
   jiraAuthHeader,
 } from '../jira/credentials';
 
+export interface JiraComment {
+  id?: string;
+  author?: { displayName?: string; emailAddress?: string };
+  body?: unknown;
+  created?: string;
+  updated?: string;
+}
+
+export interface JiraCommentField {
+  comments: JiraComment[];
+  total?: number;
+  maxResults?: number;
+  startAt?: number;
+}
+
 export interface JiraIssue {
   key: string;
   fields: {
@@ -18,8 +33,40 @@ export interface JiraIssue {
     project: { key: string; name: string };
     assignee?: { displayName: string; emailAddress: string };
     labels?: string[];
+    /** Present when getIssue enriches with /comment (devs often leave how-to-test notes). */
+    comment?: JiraCommentField;
     [key: string]: any;
   };
+}
+
+/** Plain-text dump of issue comments for analyzers / chat understanding. */
+export function formatJiraCommentsText(commentField: unknown): string {
+  const comments = (commentField as JiraCommentField | undefined)?.comments;
+  if (!Array.isArray(comments) || comments.length === 0) return '';
+
+  const extract = (content: unknown): string => {
+    if (!content) return '';
+    if (typeof content === 'string') return content;
+    let text = '';
+    const traverse = (node: any) => {
+      if (node?.type === 'text') text += `${node.text} `;
+      if (Array.isArray(node?.content)) node.content.forEach(traverse);
+    };
+    traverse(content);
+    return text.trim();
+  };
+
+  return comments
+    .map((c, i) => {
+      const author =
+        c.author?.displayName || c.author?.emailAddress || 'Desconocido';
+      const created = c.created ? String(c.created).slice(0, 10) : '';
+      const body = extract(c.body);
+      if (!body) return null;
+      return `[${i + 1}] ${author}${created ? ` (${created})` : ''}:\n${body}`;
+    })
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 export interface TestResult {
@@ -60,13 +107,44 @@ export class JiraClient {
   }
 
   /**
-   * Get issue details from Jira
+   * Get issue comments (devs often leave how-to-test / contract notes here).
+   */
+  async getIssueComments(issueKey: string): Promise<JiraCommentField> {
+    try {
+      const response = await this.client.get(`/issue/${issueKey}/comment`, {
+        params: { maxResults: 100, orderBy: 'created' },
+      });
+      const data = response.data || {};
+      return {
+        comments: Array.isArray(data.comments) ? data.comments : [],
+        total: typeof data.total === 'number' ? data.total : undefined,
+        maxResults:
+          typeof data.maxResults === 'number' ? data.maxResults : undefined,
+        startAt: typeof data.startAt === 'number' ? data.startAt : undefined,
+      };
+    } catch (error: any) {
+      logger.warn(
+        `Could not fetch comments for ${issueKey}:`,
+        error.message
+      );
+      return { comments: [], total: 0 };
+    }
+  }
+
+  /**
+   * Get issue details from Jira (includes comments — used for QA guidance).
    */
   async getIssue(issueKey: string): Promise<JiraIssue> {
     try {
       logger.info(`Fetching Jira issue: ${issueKey}`);
-      const response = await this.client.get(`/issue/${issueKey}`);
-      return response.data;
+      const [issueResponse, commentField] = await Promise.all([
+        this.client.get(`/issue/${issueKey}`),
+        this.getIssueComments(issueKey),
+      ]);
+      const issue = issueResponse.data as JiraIssue;
+      issue.fields = issue.fields || ({} as JiraIssue['fields']);
+      issue.fields.comment = commentField;
+      return issue;
     } catch (error: any) {
       logger.error(`Error fetching Jira issue ${issueKey}:`, error.message);
       throw new Error(`No se pudo traer el issue de Jira: ${error.message}`);

@@ -106,6 +106,7 @@ function migrate(database: Database.Database): void {
       phase TEXT NOT NULL DEFAULT 'queued',
       progress_json TEXT,
       result_json TEXT,
+      jira_posted_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
@@ -171,6 +172,8 @@ function migrate(database: Database.Database): void {
 
   ensureColumn(database, 'test_runs', 'phase', "TEXT NOT NULL DEFAULT 'queued'");
   ensureColumn(database, 'test_runs', 'progress_json', 'TEXT');
+  ensureColumn(database, 'test_runs', 'jira_posted_at', 'TEXT');
+  ensureColumn(database, 'test_cases', 'api_endpoints_json', 'TEXT');
 }
 
 function ensureColumn(
@@ -339,6 +342,7 @@ const SENSITIVE_SETTINGS = new Set([
   'anthropic_api_key',
   'llm_api_key',
   'jira_api_token',
+  'xray_client_secret',
 ]);
 
 export type SettingsMap = Record<string, string>;
@@ -419,6 +423,7 @@ export interface TestRunRow {
   phase: string;
   progress_json: string | null;
   result_json: string | null;
+  jira_posted_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -477,6 +482,7 @@ export function updateTestRun(
     progress_json: string | null;
     result_json: string;
     ticket_id: string;
+    jira_posted_at: string | null;
   }>
 ): TestRunRow | null {
   const existing = getTestRun(id);
@@ -491,6 +497,7 @@ export function updateTestRun(
         progress_json = ?,
         result_json = ?,
         ticket_id = ?,
+        jira_posted_at = ?,
         updated_at = datetime('now')
       WHERE id = ?`
     )
@@ -503,6 +510,9 @@ export function updateTestRun(
         : existing.progress_json,
       updates.result_json ?? existing.result_json,
       updates.ticket_id ?? existing.ticket_id,
+      updates.jira_posted_at !== undefined
+        ? updates.jira_posted_at
+        : existing.jira_posted_at,
       id
     );
 
@@ -615,10 +625,10 @@ export function formatRunMemoryContext(rows: RunMemoryRow[]): string {
 
   return rows
     .map((row, i) => {
-      const selectors = row.selectors_json
-        ? `\n  Selectors/notes: ${row.selectors_json}`
+      const notes = row.selectors_json
+        ? `\n  Notes: ${row.selectors_json}`
         : '';
-      return `${i + 1}. [${row.outcome || 'unknown'}] ${row.ticket_key || 'n/a'}: ${row.summary}${selectors}`;
+      return `${i + 1}. [${row.outcome || 'unknown'}] ${row.ticket_key || 'n/a'}: ${row.summary}${notes}`;
     })
     .join('\n');
 }
@@ -633,6 +643,7 @@ export interface TestCaseRow {
   expected_results_json: string;
   urls_json: string | null;
   selectors_json: string | null;
+  api_endpoints_json: string | null;
   source: 'manual' | 'ai';
   created_at: string;
   updated_at: string;
@@ -648,6 +659,7 @@ export interface TestCasePublic {
   expectedResults: string[];
   urls?: string[];
   selectors?: string[];
+  apiEndpoints?: string[];
   source: 'manual' | 'ai';
   created_at: string;
   updated_at: string;
@@ -662,6 +674,7 @@ export interface TestCaseInput {
   expectedResults?: string[];
   urls?: string[];
   selectors?: string[];
+  apiEndpoints?: string[];
   source?: 'manual' | 'ai';
 }
 
@@ -680,6 +693,7 @@ function parseJsonArray(value: string | null | undefined): string[] {
 function toTestCasePublic(row: TestCaseRow): TestCasePublic {
   const urls = parseJsonArray(row.urls_json);
   const selectors = parseJsonArray(row.selectors_json);
+  const apiEndpoints = parseJsonArray(row.api_endpoints_json);
   return {
     id: row.id,
     project_id: row.project_id,
@@ -690,6 +704,7 @@ function toTestCasePublic(row: TestCaseRow): TestCasePublic {
     expectedResults: parseJsonArray(row.expected_results_json),
     ...(urls.length ? { urls } : {}),
     ...(selectors.length ? { selectors } : {}),
+    ...(apiEndpoints.length ? { apiEndpoints } : {}),
     source: row.source,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -734,8 +749,9 @@ export function createTestCase(input: TestCaseInput): TestCasePublic {
     .prepare(
       `INSERT INTO test_cases (
         project_id, ticket_key, case_key, description,
-        steps_json, expected_results_json, urls_json, selectors_json, source
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        steps_json, expected_results_json, urls_json, selectors_json,
+        api_endpoints_json, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.project_id,
@@ -746,6 +762,7 @@ export function createTestCase(input: TestCaseInput): TestCasePublic {
       JSON.stringify(input.expectedResults || []),
       input.urls?.length ? JSON.stringify(input.urls) : null,
       input.selectors?.length ? JSON.stringify(input.selectors) : null,
+      input.apiEndpoints?.length ? JSON.stringify(input.apiEndpoints) : null,
       input.source || 'manual'
     );
 
@@ -778,6 +795,7 @@ export function updateTestCase(
         expected_results_json = ?,
         urls_json = ?,
         selectors_json = ?,
+        api_endpoints_json = ?,
         source = ?,
         updated_at = datetime('now')
       WHERE id = ?`
@@ -802,6 +820,11 @@ export function updateTestCase(
           ? JSON.stringify(input.selectors)
           : null
         : existing.selectors_json,
+      input.apiEndpoints !== undefined
+        ? input.apiEndpoints.length
+          ? JSON.stringify(input.apiEndpoints)
+          : null
+        : existing.api_endpoints_json,
       input.source ?? existing.source,
       id
     );

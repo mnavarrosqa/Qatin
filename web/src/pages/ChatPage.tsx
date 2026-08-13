@@ -27,7 +27,7 @@ import {
   type UiMessage,
   type ToolStep,
 } from '../chatGeneration';
-import { getFollowUps } from '../chatFollowUps';
+import { getFollowUps, followUpsLabel } from '../chatFollowUps';
 import { MessageBody } from '../chatMarkdown';
 import { Icon, type IconName } from '../components/Icon';
 import {
@@ -100,14 +100,21 @@ const SUGGESTIONS: {
   {
     label: 'Crear casos',
     prompt: 'Creá casos de prueba para ',
-    suffix: ' y guardalos',
+    suffix: '',
     placeholder: 'ABC-12',
     icon: 'list',
   },
   {
-    label: 'Probar con evidencias',
-    prompt: 'Probá ',
-    suffix: ' y dame evidencias',
+    label: 'Scripts Playwright',
+    prompt: 'Generá los scripts Playwright (.spec.ts) de ',
+    suffix: ' a partir de los casos guardados',
+    placeholder: 'ABC-12',
+    icon: 'code',
+  },
+  {
+    label: 'Probar con Playwright',
+    prompt: 'Generá scripts Playwright y ejecutá con evidencias los casos de ',
+    suffix: '',
     placeholder: 'ABC-12',
     icon: 'camera',
   },
@@ -690,6 +697,8 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const noProjects = projects.length === 0 && !loading;
   const followUps =
     !viewBusy && !noProjects ? getFollowUps(viewMessages) : [];
+  const coveragePromptActive =
+    followUps.length > 0 && followUps.every((f) => f.id.startsWith('cases-'));
 
   const filteredSessions = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -906,8 +915,8 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               <p className="chat-empty-kicker">Empezá por acá</p>
               <h2 className="chat-empty-title">¿Qué querés hacer?</h2>
               <p className="chat-empty-lead">
-                Pedilo en español natural. Yo leo el ticket, armo casos, corro
-                tests y te muestro evidencias.
+                Pedilo en español natural. Armamos casos, exportamos a Xray o
+                generamos scripts Playwright y los corremos con evidencias.
               </p>
               <div className="chat-suggestions">
                 {SUGGESTIONS.map((s) => (
@@ -1019,7 +1028,13 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                     </Link>
                   ) : null}
                   {m.content ? (
-                    <MessageBody text={m.content} streaming={isStreaming} />
+                    m.kind === 'user' ? (
+                      <div className="chat-content">
+                        <p className="chat-para">{m.content}</p>
+                      </div>
+                    ) : (
+                      <MessageBody text={m.content} streaming={isStreaming} />
+                    )
                   ) : showThinking ? (
                     <div className="chat-content chat-thinking">
                       <span className="chat-thinking-dots" aria-hidden>
@@ -1042,12 +1057,12 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                       {formatUsageLine(m.usage)}
                     </p>
                   ) : null}
-                  {showFollowUps && (
+                  {showFollowUps && !coveragePromptActive && (
                     <div
                       className="chat-followups"
                       aria-label="Sugerencias para continuar"
                     >
-                      <p className="chat-followups-label">Seguir con</p>
+                      <p className="chat-followups-label">{followUpsLabel(followUps)}</p>
                       <div className="chat-suggestions">
                         {followUps.map((f) => (
                           <button
@@ -1082,6 +1097,28 @@ export function ChatPage({ active = true }: { active?: boolean }) {
         </div>
 
         <form className="chat-composer" onSubmit={onSubmit}>
+          {coveragePromptActive ? (
+            <div
+              className="chat-composer-coverage"
+              aria-label="Elegir cobertura"
+            >
+              <p className="chat-followups-label">¿Qué cobertura?</p>
+              <div className="chat-suggestions">
+                {followUps.map((f) => (
+                  <button
+                    key={`composer-${f.id}`}
+                    type="button"
+                    className="chat-suggestion chat-followup"
+                    onClick={() => sendMessage(f.prompt)}
+                    disabled={viewBusy || noProjects}
+                    title={f.prompt}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <div className="chat-composer-box">
             <textarea
               ref={inputRef}

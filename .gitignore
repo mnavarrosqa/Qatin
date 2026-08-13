@@ -5,6 +5,7 @@ web/node_modules/
 web/dist/
 data/
 screenshots/
+generated/
 logs/
 .env
 *.log

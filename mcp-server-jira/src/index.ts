@@ -40,8 +40,18 @@ class JiraClient {
   }
 
   async getIssue(issueKey: string) {
-    const response = await this.client.get(`/issue/${issueKey}`);
-    return response.data;
+    const [issueResponse, commentsResponse] = await Promise.all([
+      this.client.get(`/issue/${issueKey}`),
+      this.client
+        .get(`/issue/${issueKey}/comment`, {
+          params: { maxResults: 100, orderBy: 'created' },
+        })
+        .catch(() => ({ data: { comments: [], total: 0 } })),
+    ]);
+    const issue = issueResponse.data;
+    issue.fields = issue.fields || {};
+    issue.fields.comment = commentsResponse.data || { comments: [], total: 0 };
+    return issue;
   }
 
   async searchIssues(jql: string, maxResults: number = 50) {

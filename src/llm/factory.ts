@@ -109,7 +109,7 @@ export function createLlmClient(
   return new OpenAICompatibleClient({
     apiKey,
     model,
-    baseUrl: provider === 'openai' ? undefined : baseUrl,
+    baseUrl,
     // Ollama's OpenAI shim varies by version; prompts already request JSON
     supportsJsonFormat: provider !== 'ollama',
     // qwen3.x thinking mode stalls / empties tool calls via the OpenAI shim

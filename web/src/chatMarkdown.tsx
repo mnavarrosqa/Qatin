@@ -1,11 +1,13 @@
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { Icon } from './components/Icon';
+import { isJiraTicketKey } from './ticketKey';
 
 const OL_RE = /^(\d+)[.)]\s+(.*)$/;
 const UL_RE = /^[-*•]\s+(.*)$/;
 const HEADING_RE = /^(#{2,3})\s+(.*)$/;
-const CSV_HEADER_RE = /^summary\s*,\s*description\b/i;
+const CSV_HEADER_RE =
+  /^(?:issue\s*id|tcid)\s*,|^\s*summary\s*,\s*(?:description|test\s*type|test\s*summary)\b/i;
 
 type ListItem = {
   text: string;
@@ -19,13 +21,20 @@ type CsvBlock = {
   rows: string[][];
 };
 
+type SpecBlock = {
+  type: 'spec';
+  text: string;
+  filename: string;
+};
+
 type ContentBlock =
   | { type: 'heading'; level: 2 | 3; text: string }
   | { type: 'para'; text: string }
   | { type: 'ul'; items: ListItem[] }
   | { type: 'ol'; items: ListItem[]; start?: number }
   | { type: 'code'; text: string }
-  | CsvBlock;
+  | CsvBlock
+  | SpecBlock;
 
 type OpenList = {
   type: 'ol' | 'ul';
@@ -60,7 +69,7 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
         </Link>
       );
     }
-    if (/^[A-Z][A-Z0-9]+-\d+$/.test(part)) {
+    if (isJiraTicketKey(part)) {
       return (
         <span key={key} className="chat-ticket">
           {part}
@@ -269,6 +278,92 @@ function splitUnfencedCsv(chunk: string): ContentBlock[] {
   return blocks;
 }
 
+function looksLikePlaywrightSpec(lang: string, body: string): boolean {
+  const l = lang.toLowerCase();
+  if (l === 'typescript' || l === 'ts') {
+    return (
+      /@playwright\/test/.test(body) ||
+      /\btest\.(describe|step)\b/.test(body) ||
+      /\btest\s*\(/.test(body)
+    );
+  }
+  return false;
+}
+
+function specFilenameFromBody(body: string): string {
+  const ticket = body.match(/Ticket:\s*([A-Z][A-Z0-9]+-\d+|PASTE-\d+)/i);
+  if (ticket) {
+    return `${ticket[1].toUpperCase()}.spec.ts`;
+  }
+  const describe = body.match(/test\.describe\(\s*['"]([^'"]+)['"]/);
+  if (describe && /^[A-Z][A-Z0-9]+-\d+$/i.test(describe[1])) {
+    return `${describe[1].toUpperCase()}.spec.ts`;
+  }
+  return 'playwright.spec.ts';
+}
+
+function downloadSpec(filename: string, content: string) {
+  const blob = new Blob([content.endsWith('\n') ? content : content + '\n'], {
+    type: 'text/typescript;charset=utf-8',
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function SpecPanel({
+  block,
+  streaming,
+}: {
+  block: SpecBlock;
+  streaming: boolean;
+}) {
+  const ready = !streaming && block.text.trim().length > 0;
+  const lines = block.text ? block.text.split('\n').length : 0;
+
+  return (
+    <div className="chat-spec">
+      <div className="chat-spec-bar">
+        <div className="chat-spec-meta">
+          <span className="chat-spec-title">Script Playwright</span>
+          {lines > 0 ? (
+            <span className="chat-spec-count">
+              {block.filename}
+              {streaming ? ' · Generando…' : ` · ${lines} líneas`}
+            </span>
+          ) : streaming ? (
+            <span className="chat-spec-count">Generando…</span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="btn btn-ghost btn-compact"
+          onClick={() => downloadSpec(block.filename, block.text)}
+          disabled={!ready}
+        >
+          <Icon name="download" size={14} />
+          Descargar
+        </button>
+      </div>
+      {block.text.trim() ? (
+        <pre className="chat-spec-pre">
+          <code>{block.text}</code>
+        </pre>
+      ) : (
+        <p className="chat-spec-empty">
+          {streaming ? (
+            <span className="chat-stream-caret" aria-hidden />
+          ) : null}
+          Armando el script…
+        </p>
+      )}
+    </div>
+  );
+}
+
 function parseBlocks(text: string): ContentBlock[] {
   const blocks: ContentBlock[] = [];
   let i = 0;
@@ -296,6 +391,12 @@ function parseBlocks(text: string): ContentBlock[] {
 
     if (looksLikeCsv(lang, inner)) {
       blocks.push(csvBlockFromText(inner));
+    } else if (looksLikePlaywrightSpec(lang, inner)) {
+      blocks.push({
+        type: 'spec',
+        text: inner,
+        filename: specFilenameFromBody(inner),
+      });
     } else {
       blocks.push({ type: 'code', text: inner });
     }
@@ -316,16 +417,112 @@ function serializeCsv(headers: string[], rows: string[][]): string {
   return [headers, ...rows].map((row) => row.map(esc).join(',')).join('\n');
 }
 
-function downloadCsv(headers: string[], rows: string[][]) {
-  const blob = new Blob([serializeCsv(headers, rows) + '\n'], {
+function colIndex(headers: string[], names: string[]): number {
+  const normalized = headers.map((h) => h.trim().toLowerCase());
+  for (const name of names) {
+    const i = normalized.indexOf(name.toLowerCase());
+    if (i >= 0) return i;
+  }
+  return -1;
+}
+
+function cell(row: string[], index: number): string {
+  return index >= 0 ? (row[index] || '').trim() : '';
+}
+
+type XrayCaseGroup = {
+  id: string;
+  summary: string;
+  description: string;
+  testType: string;
+  steps: { action: string; data: string; expected: string }[];
+};
+
+function groupXrayCases(headers: string[], rows: string[][]): XrayCaseGroup[] {
+  const idIdx = colIndex(headers, ['Issue Id', 'IssueId', 'TCID', 'TC Id']);
+  const summaryIdx = colIndex(headers, ['Summary', 'Test Summary']);
+  const descIdx = colIndex(headers, ['Description']);
+  const typeIdx = colIndex(headers, ['Test Type', 'TestType']);
+  const stepIdx = colIndex(headers, ['Step', 'Action']);
+  const dataIdx = colIndex(headers, ['Data']);
+  const expectedIdx = colIndex(headers, [
+    'Expected Result',
+    'Expected Results',
+    'Result',
+  ]);
+
+  const groups: XrayCaseGroup[] = [];
+  let current: XrayCaseGroup | null = null;
+
+  for (const row of rows) {
+    const issueId = cell(row, idIdx);
+    const summary = cell(row, summaryIdx);
+    const description = cell(row, descIdx);
+    const testType = cell(row, typeIdx);
+    const action = cell(row, stepIdx);
+    const data = cell(row, dataIdx);
+    const expected = cell(row, expectedIdx);
+
+    const startsNew =
+      Boolean(summary) ||
+      (issueId && (!current || current.id !== issueId)) ||
+      (!current && (action || description));
+
+    if (startsNew) {
+      current = {
+        id: issueId || String(groups.length + 1),
+        summary: summary || `Caso ${groups.length + 1}`,
+        description,
+        testType: testType || 'Manual',
+        steps: [],
+      };
+      groups.push(current);
+    } else if (!current) {
+      current = {
+        id: issueId || '1',
+        summary: summary || 'Caso 1',
+        description,
+        testType: testType || 'Manual',
+        steps: [],
+      };
+      groups.push(current);
+    }
+
+    if (action || data || expected) {
+      current.steps.push({ action, data, expected });
+    } else if (description && !current.description) {
+      current.description = description;
+    }
+  }
+
+  return groups;
+}
+
+function csvFilename(headers: string[], rows: string[][]): string {
+  const blob = [headers.join(' '), ...rows.map((r) => r.join(' '))].join(' ');
+  const m = blob.match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
+  return m ? `${m[1]}-xray.csv` : 'casos-xray.csv';
+}
+
+function downloadCsv(headers: string[], rows: string[][], filename: string) {
+  const blob = new Blob(['\uFEFF' + serializeCsv(headers, rows) + '\n'], {
     type: 'text/csv;charset=utf-8',
   });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'casos-xray.csv';
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+async function copyCsv(headers: string[], rows: string[][]): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(serializeCsv(headers, rows) + '\n');
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function CsvTable({
@@ -335,33 +532,107 @@ function CsvTable({
   block: CsvBlock;
   streaming: boolean;
 }) {
+  const [copied, setCopied] = useState(false);
   const generating = streaming;
   const ready = !streaming && block.headers.length > 0 && block.rows.length > 0;
+  const groups = ready ? groupXrayCases(block.headers, block.rows) : [];
+  const caseCount = groups.length || 0;
+  const stepCount = groups.reduce((n, g) => n + g.steps.length, 0);
+  const filename = csvFilename(block.headers, block.rows);
+
+  const onCopy = async () => {
+    if (!ready) return;
+    const ok = await copyCsv(block.headers, block.rows);
+    if (!ok) return;
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  };
 
   return (
     <div className="chat-csv">
       <div className="chat-csv-bar">
         <div className="chat-csv-meta">
           <span className="chat-csv-title">CSV para Xray</span>
-          {block.rows.length > 0 ? (
+          {caseCount > 0 ? (
             <span className="chat-csv-count">
-              {block.rows.length} {block.rows.length === 1 ? 'fila' : 'filas'}
+              {caseCount} {caseCount === 1 ? 'caso' : 'casos'}
+              {stepCount > 0
+                ? ` · ${stepCount} ${stepCount === 1 ? 'paso' : 'pasos'}`
+                : ''}
             </span>
           ) : generating ? (
             <span className="chat-csv-count">Generando…</span>
           ) : null}
         </div>
-        <button
-          type="button"
-          className="btn btn-ghost btn-compact"
-          onClick={() => downloadCsv(block.headers, block.rows)}
-          disabled={!ready}
-        >
-          <Icon name="download" size={14} />
-          Descargar
-        </button>
+        <div className="chat-csv-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-compact"
+            onClick={onCopy}
+            disabled={!ready}
+          >
+            <Icon name={copied ? 'check' : 'copy'} size={14} />
+            {copied ? 'Copiado' : 'Copiar'}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-compact"
+            onClick={() => downloadCsv(block.headers, block.rows, filename)}
+            disabled={!ready}
+          >
+            <Icon name="download" size={14} />
+            Descargar
+          </button>
+        </div>
       </div>
-      {block.headers.length > 0 ? (
+      {ready ? (
+        <>
+          <p className="chat-csv-hint">
+            Importá en Xray → <strong>Test Case Importer</strong>. Mapeá{' '}
+            <code>Issue Id</code>, <code>Summary</code>, <code>Step</code> →
+            Action, <code>Data</code>, <code>Expected Result</code> → Result.
+            Archivo: <code>{filename}</code>
+          </p>
+          <div className="chat-csv-cases">
+            {groups.map((g, gi) => (
+              <details key={`${g.id}-${gi}`} className="chat-csv-case" open={gi < 3}>
+                <summary>
+                  <span className="chat-csv-case-id">{g.id}</span>
+                  <span className="chat-csv-case-title">{g.summary}</span>
+                  <span className="chat-csv-case-meta">
+                    {g.testType}
+                    {g.steps.length
+                      ? ` · ${g.steps.length} paso${g.steps.length === 1 ? '' : 's'}`
+                      : ''}
+                  </span>
+                </summary>
+                {g.description ? (
+                  <p className="chat-csv-case-desc">{g.description}</p>
+                ) : null}
+                {g.steps.length ? (
+                  <ol className="chat-csv-steps">
+                    {g.steps.map((s, si) => (
+                      <li key={si}>
+                        <div className="chat-csv-step-action">{s.action}</div>
+                        {s.data ? (
+                          <div className="chat-csv-step-data">
+                            Data: <code>{s.data}</code>
+                          </div>
+                        ) : null}
+                        {s.expected ? (
+                          <div className="chat-csv-step-expected">
+                            Esperado: {s.expected}
+                          </div>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
+              </details>
+            ))}
+          </div>
+        </>
+      ) : block.headers.length > 0 ? (
         <div className="chat-csv-scroll">
           <table aria-label="Casos en CSV para Xray">
             <thead>
@@ -452,7 +723,8 @@ export function MessageBody({
 
   const blocks = cleaned ? parseBlocks(cleaned) : [];
   const last = blocks[blocks.length - 1];
-  const caretAfterText = streaming && last?.type !== 'csv';
+  const caretAfterText =
+    streaming && last?.type !== 'csv' && last?.type !== 'spec';
 
   return (
     <div className="chat-content">
@@ -469,6 +741,15 @@ export function MessageBody({
         if (block.type === 'csv') {
           return (
             <CsvTable
+              key={key}
+              block={block}
+              streaming={streaming && bi === blocks.length - 1}
+            />
+          );
+        }
+        if (block.type === 'spec') {
+          return (
+            <SpecPanel
               key={key}
               block={block}
               streaming={streaming && bi === blocks.length - 1}

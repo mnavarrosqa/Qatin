@@ -16,7 +16,6 @@ import {
   getProject,
   getProjectCredentials,
   getRunMemory,
-  formatRunMemoryContext,
   listTestCases,
   getTestCase,
   createTestCase,
@@ -32,7 +31,17 @@ import {
 } from '../db';
 import { testQueue } from '../queue';
 import { logger } from '../utils/logger';
-import { PROVIDER_DEFAULTS, LlmProvider, testLlmConnection, providerApiKeySetting, readProviderProfile, resolveLlmConfig, getPromptTier } from '../llm';
+import {
+  PROVIDER_DEFAULTS,
+  PROVIDER_CATALOG,
+  modelOptionLabel,
+  LlmProvider,
+  testLlmConnection,
+  providerApiKeySetting,
+  readProviderProfile,
+  resolveLlmConfig,
+  getPromptTier,
+} from '../llm';
 import {
   listPlugins,
   updatePluginConfig,
@@ -49,19 +58,34 @@ import {
   createSyntheticTicket,
   TestStrategy,
   getDefaultAnalyzerInstructions,
+  parseTestCoverage,
+  detectTestSurface,
+  extractCommentsText,
+  mergeTicketText,
 } from '../agents/ticket-analyzer';
+import {
+  formatRunMemoryContext,
+  buildFewShotFromProject,
+} from '../agents/qa-memory';
+import { lintTestCases } from '../agents/test-case-lint';
 import { getJiraClient } from '../clients/jira-mcp-client';
 import { runQaChatTurn, getDefaultChatInstructions } from '../agents/qa-chat-agent';
 import { presentRun, presentRunDetail } from '../runs/progress';
-import { cancelTestRun, removeTestRun } from '../runs/manage';
+import { cancelTestRun, removeTestRun, rerunTestRun, publishRunToJira } from '../runs/manage';
+import {
+  buildStrategyFromSavedCases,
+  CASES_REQUIRED_ERROR,
+} from '../runs/strategy-from-cases';
+import {
+  generatePlaywrightSpecs,
+  hasPlaywrightSpecsOnDisk,
+} from '../agents/playwright-spec-generator';
+import { resolveTicketKey } from '../utils/ticket-key';
 
 const router = Router();
 
 function extractTicketKey(ticketId?: string, ticketUrl?: string): string | null {
-  if (ticketId?.trim()) return ticketId.trim().toUpperCase();
-  if (!ticketUrl) return null;
-  const match = ticketUrl.match(/[A-Z][A-Z0-9]+-\d+/i);
-  return match ? match[0].toUpperCase() : null;
+  return resolveTicketKey(ticketId, ticketUrl);
 }
 
 function descriptionToText(content: unknown): string {
@@ -105,6 +129,7 @@ router.get('/providers', (_req, res) => {
     providers: Object.entries(PROVIDER_DEFAULTS).map(([id, meta]) => {
       const provider = id as LlmProvider;
       const profile = readProviderProfile(provider);
+      const catalog = PROVIDER_CATALOG[provider];
       const keyName = providerApiKeySetting(provider);
       const hasKey = keyName ? Boolean(settings[keyName]) : false;
       const hasProfile = Boolean(profile.model || profile.baseUrl);
@@ -124,6 +149,14 @@ router.get('/providers', (_req, res) => {
         configuredModel: profile.model || null,
         configuredBaseUrl: profile.baseUrl || meta.baseUrl || null,
         requiresBaseUrl: provider === 'openai-compatible' || provider === 'ollama',
+        models: catalog.models.map((m) => ({
+          id: m.id,
+          name: m.name,
+          priceLabel: m.priceLabel,
+          priceHint: m.priceHint || null,
+          optionLabel: modelOptionLabel(m),
+        })),
+        baseUrls: catalog.baseUrls,
       };
     }),
   });
@@ -347,6 +380,70 @@ router.get('/agent-prompts', (_req, res) => {
   }
 });
 
+router.post('/jira/test', async (req, res) => {
+  try {
+    const body = z
+      .object({
+        jira_url: z.string().optional(),
+        jira_email: z.string().optional(),
+        jira_api_token: z.string().optional(),
+      })
+      .parse(req.body || {});
+
+    const { testJiraConnection } = await import('../jira/credentials');
+    const result = await testJiraConnection({
+      url: body.jira_url?.trim() || undefined,
+      email: body.jira_email?.trim() || undefined,
+      token:
+        body.jira_api_token && body.jira_api_token !== '••••••••'
+          ? body.jira_api_token
+          : undefined,
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Pedido inválido', details: error.errors });
+    }
+    logger.warn('Jira connection test failed:', error);
+    res.status(400).json({
+      ok: false,
+      error: error?.message || 'Falló la prueba de conexión a Jira',
+    });
+  }
+});
+
+router.post('/xray/test', async (req, res) => {
+  try {
+    const body = z
+      .object({
+        xray_client_id: z.string().optional(),
+        xray_client_secret: z.string().optional(),
+      })
+      .parse(req.body || {});
+
+    const { testXrayConnection } = await import('../jira/xray-credentials');
+    const result = await testXrayConnection({
+      clientId: body.xray_client_id?.trim() || undefined,
+      clientSecret:
+        body.xray_client_secret && body.xray_client_secret !== '••••••••'
+          ? body.xray_client_secret
+          : undefined,
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({ error: 'Pedido inválido', details: error.errors });
+    }
+    logger.warn('Xray connection test failed:', error);
+    res.status(400).json({
+      ok: false,
+      error: error?.message || 'Falló la prueba de conexión a Xray',
+    });
+  }
+});
+
 router.post('/jira/mcp/connect', async (req, res) => {
   try {
     const body = z
@@ -443,6 +540,54 @@ router.post('/runs/:id/cancel', async (req, res) => {
   }
 });
 
+router.post('/runs/:id/rerun', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Run inválido' });
+  }
+  try {
+    const result = await rerunTestRun(id);
+    if (result.error) {
+      const status = result.sourceRun ? 409 : 404;
+      return res.status(status).json({
+        error: result.error,
+        ...(result.sourceRun ? { run: presentRun(result.sourceRun) } : {}),
+      });
+    }
+    if (!result.run) {
+      return res.status(404).json({ error: 'Run no encontrado' });
+    }
+    res.json({ run: presentRun(result.run) });
+  } catch (error: any) {
+    logger.error('Error re-running:', error);
+    res.status(500).json({ error: 'No se pudo re-ejecutar' });
+  }
+});
+
+router.post('/runs/:id/publish-jira', async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isFinite(id) || id <= 0) {
+    return res.status(400).json({ error: 'Run inválido' });
+  }
+  try {
+    const result = await publishRunToJira(id);
+    if (!result.run) {
+      return res.status(404).json({ error: result.error || 'Run no encontrado' });
+    }
+    if (result.error) {
+      const status = result.error.includes('ya se publicaron') ? 409 : 400;
+      return res.status(status).json({
+        error: result.error,
+        run: presentRun(result.run),
+      });
+    }
+    res.json({ run: presentRun(result.run) });
+  } catch (error: any) {
+    logger.error('Error publishing to Jira:', error);
+    res.status(500).json({ error: 'No se pudo publicar en Jira' });
+  }
+});
+
 router.delete('/runs/:id', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id) || id <= 0) {
@@ -529,6 +674,7 @@ router.put('/skills/:id', (req, res) => {
 const scenarioSchema = z.object({
   id: z.string().min(1),
   description: z.string().min(1),
+  kind: z.enum(['happy', 'unhappy', 'corner']).optional(),
   steps: z.array(z.string()).default([]),
   expectedResults: z.array(z.string()).default([]),
   urls: z.array(z.string()).optional(),
@@ -555,6 +701,7 @@ const runSchema = z
       })
       .optional(),
     strategy: strategySchema.optional(),
+    coverage: z.enum(['happy', 'unhappy', 'corner', 'all']).optional(),
   })
   .refine(
     (data) => data.ticketId || data.ticketUrl || data.pastedTicket,
@@ -575,6 +722,7 @@ const testCaseBodySchema = z.object({
 const replaceTestCasesSchema = z
   .object({
     ticket_key: z.string().nullable().optional(),
+    force: z.boolean().optional(),
     cases: z
       .array(
         z.object({
@@ -630,17 +778,31 @@ router.post('/projects/:id/analyze', async (req, res) => {
 
     const analyzeOptions = {
       memoryContext: undefined as string | undefined,
+      fewShotExamples: undefined as string | undefined,
+      coverage: parseTestCoverage(body.coverage) || undefined,
     };
 
-    if (isInstalled('engram')) {
-      const memories = getRunMemory({
-        projectId,
-        ticketKey: ticket.key,
-        limit: 5,
-      });
-      const ctx = formatRunMemoryContext(memories);
-      if (ctx) analyzeOptions.memoryContext = ctx;
-    }
+    const memories = getRunMemory({
+      projectId,
+      ticketKey: ticket.key,
+      limit: 5,
+    });
+    const ctx = formatRunMemoryContext(memories);
+    if (ctx) analyzeOptions.memoryContext = ctx;
+
+    const description = descriptionToText(ticket.fields.description);
+    const comments = extractCommentsText(ticket);
+    const fewShot = buildFewShotFromProject(projectId, {
+      excludeTicketKey: ticket.key,
+      limit: 2,
+      surface: detectTestSurface({
+        summary: ticket.fields.summary,
+        description: mergeTicketText(description, comments),
+        labels: ticket.fields.labels,
+        issuetype: ticket.fields.issuetype?.name,
+      }),
+    });
+    if (fewShot) analyzeOptions.fewShotExamples = fewShot;
 
     const analyzer = new TicketAnalyzer({
       provider: llmProvider,
@@ -658,7 +820,18 @@ router.post('/projects/:id/analyze', async (req, res) => {
       usedFallback = true;
     }
 
-    const description = descriptionToText(ticket.fields.description);
+    const lint = lintTestCases(
+      strategy.scenarios.map((s: { id: string; description: string; steps: string[]; expectedResults: string[]; urls?: string[]; selectors?: string[]; apiEndpoints?: string[] }) => ({
+        case_key: s.id,
+        description: s.description,
+        steps: s.steps,
+        expectedResults: s.expectedResults,
+        urls: s.urls,
+        selectors: s.selectors,
+        apiEndpoints: s.apiEndpoints,
+      })),
+      { testType: strategy.testType }
+    );
 
     res.json({
       success: true,
@@ -672,9 +845,11 @@ router.post('/projects/:id/analyze', async (req, res) => {
         priority: ticket.fields.priority?.name || 'Medium',
         labels: ticket.fields.labels || [],
         description,
+        comments: comments || undefined,
       },
       understanding: strategy.summary,
       strategy,
+      lint,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -720,6 +895,49 @@ router.post('/projects/:id/run', async (req, res) => {
 
     const llmProvider = (project.llm_provider as LlmProvider | null) || undefined;
 
+    const strategy =
+      (body.strategy as TestStrategy | undefined)?.scenarios?.length
+        ? (body.strategy as TestStrategy)
+        : ticketId
+          ? buildStrategyFromSavedCases(projectId, ticketId)
+          : null;
+
+    if (!strategy?.scenarios?.length) {
+      return res.status(400).json({
+        error: CASES_REQUIRED_ERROR,
+        code: 'cases_required',
+      });
+    }
+
+    let playwrightSpecs: {
+      generated: boolean;
+      path?: string;
+      alreadyExisted?: boolean;
+      error?: string;
+    } = { generated: false };
+    if (ticketId && !hasPlaywrightSpecsOnDisk(ticketId)) {
+      try {
+        const generated = generatePlaywrightSpecs({
+          strategy,
+          ticketKey: ticketId,
+          baseUrl: project.base_url || process.env.APP_BASE_URL,
+          write: true,
+        });
+        playwrightSpecs = {
+          generated: true,
+          path: generated.files[0]?.relativePath,
+        };
+      } catch (err) {
+        logger.warn('API run: playwright spec generation failed (non-blocking)', err);
+        playwrightSpecs = {
+          generated: false,
+          error: err instanceof Error ? err.message : 'spec write failed',
+        };
+      }
+    } else if (ticketId) {
+      playwrightSpecs = { generated: false, alreadyExisted: true };
+    }
+
     const run = createTestRun({
       project_id: projectId,
       source,
@@ -738,7 +956,7 @@ router.post('/projects/:id/run', async (req, res) => {
         source === 'paste'
           ? { summary: pastedSummary, description: pastedDescription }
           : undefined,
-      strategy: body.strategy as TestStrategy | undefined,
+      strategy,
       projectConfig: {
         baseUrl: project.base_url || process.env.APP_BASE_URL,
         stagingUrl: project.staging_url || process.env.APP_STAGING_URL,
@@ -764,6 +982,8 @@ router.post('/projects/:id/run', async (req, res) => {
       jobId: job.id,
       ticketId,
       source,
+      casesUsed: strategy.scenarios.length,
+      playwrightSpecs,
       message: 'Job de test encolado correctamente',
       status: `Check job status at /api/job-status/${job.id}`,
     });
@@ -875,13 +1095,28 @@ router.put('/projects/:id/test-cases', (req, res) => {
       ticket_key: ticketKey,
     }));
 
+    const lint = lintTestCases(casesInput);
+    if (!lint.ok && !body.force) {
+      return res.status(400).json({
+        error: 'Los casos no pasan la validación de calidad',
+        code: 'cases_lint_failed',
+        lint,
+      });
+    }
+
     const cases = replaceProjectTestCases({
       projectId,
       ticketKey,
       cases: casesInput,
     });
 
-    res.json({ cases, total: cases.length, ticket_key: ticketKey });
+    res.json({
+      cases,
+      total: cases.length,
+      ticket_key: ticketKey,
+      lint,
+      forcedSave: Boolean(body.force && !lint.ok),
+    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({ error: 'Pedido inválido', details: error.errors });

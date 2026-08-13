@@ -1,10 +1,20 @@
-import { chromium, Browser, Page, BrowserContext } from 'playwright';
+import { chromium, Browser, Page, BrowserContext, request as playwrightRequest } from 'playwright';
 import path from 'path';
 import fs from 'fs/promises';
 import { logger } from '../utils/logger';
-import { TestStrategy, TestScenario } from './ticket-analyzer';
+import { TestStrategy, TestScenario, looksLikeApiCase } from './ticket-analyzer';
 import { getRuntimePlugins, RuntimePlugins } from '../plugins';
 import { getScreenshotsDir } from '../paths';
+import {
+  apiAuthHeaders,
+  classifyApiStep,
+  expectedStatusFromScenario,
+  parseApiEndpoint,
+  payloadFromSteps,
+  resolveApiBaseUrl,
+  resolveApiBearerToken,
+  resolvePathTemplates,
+} from './api-case-steps';
 
 export interface ExecutionResult {
   success: boolean;
@@ -13,6 +23,8 @@ export interface ExecutionResult {
   steps: StepResult[];
   screenshots: Screenshot[];
   errors: string[];
+  /** Non-fatal noise (e.g. console.error) — does not fail the scenario alone. */
+  warnings: string[];
   duration: number;
 }
 
@@ -43,6 +55,7 @@ export interface ExecutorConfig {
   baseUrl?: string;
   testUserEmail?: string | null;
   testUserPassword?: string | null;
+  apiToken?: string | null;
   plugins?: RuntimePlugins;
 }
 
@@ -54,13 +67,26 @@ export type ExecutorProgressEvent =
       scenario: TestScenario;
     }
   | {
-      type: 'step';
+      type: 'step_start';
       index: number;
       total: number;
       scenario: TestScenario;
       step: string;
       stepIndex: number;
       stepTotal: number;
+    }
+  | {
+      type: 'step_end';
+      index: number;
+      total: number;
+      scenario: TestScenario;
+      step: string;
+      stepIndex: number;
+      stepTotal: number;
+      success: boolean;
+      duration: number;
+      error?: string;
+      screenshot?: string;
     }
   | {
       type: 'scenario_end';
@@ -78,7 +104,14 @@ export class TestExecutor {
   private baseUrl: string;
   private testUserEmail: string | null;
   private testUserPassword: string | null;
+  private apiToken: string | null;
+  /** Cookie/localStorage session from UI login, reused by API request context. */
+  private apiStorageState: Awaited<
+    ReturnType<BrowserContext['storageState']>
+  > | null = null;
   private plugins: RuntimePlugins;
+  /** Deep link to restore after login when navigate was redirected to /login. */
+  private pendingPostLoginUrl: string | null = null;
 
   constructor(config?: ExecutorConfig) {
     this.screenshotsDir = getScreenshotsDir();
@@ -88,9 +121,22 @@ export class TestExecutor {
       config?.testUserEmail ?? process.env.TEST_USER_EMAIL ?? null;
     this.testUserPassword =
       config?.testUserPassword ?? process.env.TEST_USER_PASSWORD ?? null;
+    this.apiToken =
+      config?.apiToken ??
+      process.env.API_TOKEN ??
+      process.env.TEST_API_TOKEN ??
+      process.env.API_BEARER_TOKEN ??
+      null;
+    // So generated specs / helpers that read process.env see project creds.
+    if (this.testUserEmail) process.env.TEST_USER_EMAIL = this.testUserEmail;
+    if (this.testUserPassword) {
+      process.env.TEST_USER_PASSWORD = this.testUserPassword;
+    }
     this.plugins = config?.plugins ?? getRuntimePlugins();
     logger.info('TestExecutor initialized', {
       baseUrl: this.baseUrl,
+      hasQaCredentials: Boolean(this.testUserEmail && this.testUserPassword),
+      hasApiToken: Boolean(this.apiToken),
       plugins: this.plugins,
     });
   }
@@ -100,6 +146,7 @@ export class TestExecutor {
       baseUrl: config.baseUrl ?? this.baseUrl,
       testUserEmail: config.testUserEmail ?? this.testUserEmail,
       testUserPassword: config.testUserPassword ?? this.testUserPassword,
+      apiToken: config.apiToken ?? this.apiToken,
       plugins: config.plugins ?? this.plugins,
     });
   }
@@ -110,9 +157,12 @@ export class TestExecutor {
     onProgress?: ExecutorProgressHandler
   ): Promise<ExecutionResult[]> {
     const results: ExecutionResult[] = [];
+    const needsBrowser = strategy.scenarios.some((s) => !looksLikeApiCase(s));
 
     try {
-      await this.launchBrowser();
+      if (needsBrowser) {
+        await this.launchBrowser();
+      }
 
       const ticketScreenshotsDir = path.join(this.screenshotsDir, ticketId);
       await fs.mkdir(ticketScreenshotsDir, { recursive: true });
@@ -122,22 +172,68 @@ export class TestExecutor {
         const scenario = strategy.scenarios[index];
         logger.info(`Executing scenario: ${scenario.id}`);
         onProgress?.({ type: 'scenario_start', index, total, scenario });
-        const result = await this.executeScenario(
-          ticketId,
-          scenario,
-          ticketScreenshotsDir,
-          (step, stepIndex, stepTotal) => {
-            onProgress?.({
-              type: 'step',
-              index,
-              total,
+        const result = looksLikeApiCase(scenario)
+          ? await this.executeApiScenario(ticketId, scenario, {
+              onStart: (step, stepIndex, stepTotal) => {
+                onProgress?.({
+                  type: 'step_start',
+                  index,
+                  total,
+                  scenario,
+                  step,
+                  stepIndex,
+                  stepTotal,
+                });
+              },
+              onEnd: (stepResult, stepIndex, stepTotal) => {
+                onProgress?.({
+                  type: 'step_end',
+                  index,
+                  total,
+                  scenario,
+                  step: stepResult.step,
+                  stepIndex,
+                  stepTotal,
+                  success: stepResult.success,
+                  duration: stepResult.duration,
+                  error: stepResult.error,
+                  screenshot: stepResult.screenshot,
+                });
+              },
+            })
+          : await this.executeScenario(
+              ticketId,
               scenario,
-              step,
-              stepIndex,
-              stepTotal,
-            });
-          }
-        );
+              ticketScreenshotsDir,
+              {
+                onStart: (step, stepIndex, stepTotal) => {
+                  onProgress?.({
+                    type: 'step_start',
+                    index,
+                    total,
+                    scenario,
+                    step,
+                    stepIndex,
+                    stepTotal,
+                  });
+                },
+                onEnd: (stepResult, stepIndex, stepTotal) => {
+                  onProgress?.({
+                    type: 'step_end',
+                    index,
+                    total,
+                    scenario,
+                    step: stepResult.step,
+                    stepIndex,
+                    stepTotal,
+                    success: stepResult.success,
+                    duration: stepResult.duration,
+                    error: stepResult.error,
+                    screenshot: stepResult.screenshot,
+                  });
+                },
+              }
+            );
         results.push(result);
         onProgress?.({ type: 'scenario_end', index, total, scenario, result });
       }
@@ -151,21 +247,280 @@ export class TestExecutor {
     return results;
   }
 
+  private async executeApiScenario(
+    ticketId: string,
+    scenario: TestScenario,
+    onStep?: {
+      onStart?: (step: string, stepIndex: number, stepTotal: number) => void;
+      onEnd?: (
+        result: StepResult,
+        stepIndex: number,
+        stepTotal: number
+      ) => void;
+    }
+  ): Promise<ExecutionResult> {
+    const startTime = Date.now();
+    const stepResults: StepResult[] = [];
+    const errors: string[] = [];
+    const apiBase = resolveApiBaseUrl(this.baseUrl);
+    const buildHeaders = () => ({
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...apiAuthHeaders(this.apiToken),
+    });
+
+    const obtainAuthViaUiLogin = async () => {
+      if (!this.testUserEmail || !this.testUserPassword) return false;
+      await this.launchBrowser();
+      const bctx = await this.browser!.newContext();
+      const page = await bctx.newPage();
+      try {
+        await this.performLogin(page);
+        const token = await page.evaluate(() => {
+          // Runs in browser; avoid DOM lib types in Node tsc.
+          const g = globalThis as unknown as {
+            localStorage: {
+              getItem: (k: string) => string | null;
+              key: (i: number) => string | null;
+              length: number;
+            };
+            sessionStorage: {
+              getItem: (k: string) => string | null;
+              key: (i: number) => string | null;
+              length: number;
+            };
+          };
+          const pick = (store: typeof g.localStorage) => {
+            const preferred = [
+              'token',
+              'access_token',
+              'accessToken',
+              'authToken',
+              'jwt',
+              'id_token',
+            ];
+            for (const k of preferred) {
+              const v = store.getItem(k);
+              if (v && v.length > 8) return v;
+            }
+            for (let i = 0; i < store.length; i++) {
+              const key = store.key(i);
+              if (!key || !/token|jwt|auth/i.test(key)) continue;
+              const v = store.getItem(key);
+              if (v && v.length > 20) return v;
+            }
+            return null;
+          };
+          return pick(g.localStorage) || pick(g.sessionStorage);
+        });
+        if (token) {
+          this.apiToken = token;
+          process.env.API_TOKEN = token;
+          logger.info('API auth: bearer from UI login storage', {
+            ticketId,
+            scenarioId: scenario.id,
+          });
+          return true;
+        }
+        this.apiStorageState = await bctx.storageState();
+        logger.info('API auth: using UI login cookies/storageState', {
+          ticketId,
+          scenarioId: scenario.id,
+          cookieCount: this.apiStorageState.cookies?.length || 0,
+        });
+        return true;
+      } finally {
+        await bctx.close();
+      }
+    };
+
+    const ensureApiAuth = async (reason: string) => {
+      if (this.apiToken || this.apiStorageState) return;
+      const obtained = await resolveApiBearerToken({
+        apiBase,
+        email: this.testUserEmail,
+        password: this.testUserPassword,
+        request: playwrightRequest,
+      });
+      if (obtained) {
+        this.apiToken = obtained;
+        process.env.API_TOKEN = obtained;
+        logger.info(`API auth (${reason}): bearer token ready`, {
+          ticketId,
+          scenarioId: scenario.id,
+        });
+        return;
+      }
+      if (await obtainAuthViaUiLogin()) return;
+      if (!this.testUserEmail || !this.testUserPassword) {
+        throw new Error(
+          'Autenticación API: faltan credenciales QA del proyecto (Proyectos → mail/password de test) o API_TOKEN'
+        );
+      }
+      throw new Error(
+        'Autenticación API: no se pudo obtener sesión con el usuario QA del proyecto (login API/UI).'
+      );
+    };
+
+    await ensureApiAuth('preflight').catch((err) => {
+      // Soft preflight: auth step (if present) will fail hard; otherwise send may 401.
+      logger.warn(String(err?.message || err), {
+        ticketId,
+        scenarioId: scenario.id,
+      });
+    });
+
+    let context = await playwrightRequest.newContext({
+      baseURL: apiBase,
+      extraHTTPHeaders: buildHeaders(),
+      ...(this.apiStorageState ? { storageState: this.apiStorageState } : {}),
+    });
+
+    let payload: Record<string, unknown> = payloadFromSteps(scenario.steps || []);
+    let lastStatus: number | undefined;
+    let lastBody: unknown;
+
+    try {
+      const steps = scenario.steps || [];
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        const stepStart = Date.now();
+        onStep?.onStart?.(step, i, steps.length);
+        try {
+          const kind = classifyApiStep(step);
+          const ep = parseApiEndpoint(scenario, step);
+          if (kind === 'auth') {
+            await ensureApiAuth('step');
+            await context.dispose();
+            context = await playwrightRequest.newContext({
+              baseURL: apiBase,
+              extraHTTPHeaders: buildHeaders(),
+              ...(this.apiStorageState
+                ? { storageState: this.apiStorageState }
+                : {}),
+            });
+          } else if (kind === 'pending_discovery') {
+            throw new Error(
+              `Caso bloqueado (sin inventar): ${step}. Confirmá METHOD/path/params en Network/Swagger y actualizá el caso.`
+            );
+          } else if (kind === 'prepare_payload') {
+            payload = { ...payload, ...payloadFromSteps([step]) };
+          } else if (kind === 'send') {
+            const method = ep.method;
+            const rawPath =
+              ep.path === '/' ? parseApiEndpoint(scenario).path : ep.path;
+            const pathName = resolvePathTemplates(rawPath);
+            const res =
+              method === 'GET'
+                ? await context.get(pathName)
+                : method === 'DELETE'
+                  ? await context.delete(pathName)
+                  : method === 'PUT'
+                    ? await context.put(pathName, { data: payload })
+                    : method === 'PATCH'
+                      ? await context.patch(pathName, { data: payload })
+                      : await context.post(pathName, { data: payload });
+            lastStatus = res.status();
+            lastBody = await res.json().catch(async () => res.text());
+            logger.info(`API ${method} ${apiBase}${pathName} → ${lastStatus}`, {
+              ticketId,
+              scenarioId: scenario.id,
+            });
+          } else if (kind === 'assert_status') {
+            const expected = expectedStatusFromScenario({
+              steps: [step],
+              expectedResults: scenario.expectedResults,
+            });
+            if (lastStatus === undefined) {
+              throw new Error('No hubo response para assert de status');
+            }
+            if (lastStatus !== expected) {
+              throw new Error(
+                `Status HTTP esperado ${expected}, recibido ${lastStatus}. Body: ${JSON.stringify(lastBody).slice(0, 400)}`
+              );
+            }
+          } else {
+            // assert_body / other — soft check on quoted token or that we got a response
+            const quoted = step.match(/['"]([^'"]+)['"]/)?.[1];
+            if (lastStatus === undefined) {
+              throw new Error(`Paso API sin request previo: ${step}`);
+            }
+            if (quoted) {
+              const blob = JSON.stringify(lastBody ?? '');
+              if (!blob.includes(quoted)) {
+                throw new Error(
+                  `Body no contiene '${quoted}'. Status=${lastStatus}. Body: ${blob.slice(0, 400)}`
+                );
+              }
+            } else if (lastStatus >= 500) {
+              throw new Error(
+                `Status ${lastStatus} (server error). Body: ${JSON.stringify(lastBody).slice(0, 400)}`
+              );
+            }
+          }
+
+          const stepResult: StepResult = {
+            step,
+            success: true,
+            duration: Date.now() - stepStart,
+          };
+          stepResults.push(stepResult);
+          onStep?.onEnd?.(stepResult, i, steps.length);
+        } catch (error: any) {
+          const errorMessage = TestExecutor.formatErrorMessage(error);
+          const stepResult: StepResult = {
+            step,
+            success: false,
+            duration: Date.now() - stepStart,
+            error: errorMessage,
+          };
+          stepResults.push(stepResult);
+          errors.push(errorMessage);
+          onStep?.onEnd?.(stepResult, i, steps.length);
+          break;
+        }
+      }
+    } finally {
+      await context.dispose();
+    }
+
+    return {
+      success: errors.length === 0 && stepResults.every((s) => s.success),
+      scenarioId: scenario.id,
+      description: scenario.description,
+      steps: stepResults,
+      screenshots: [],
+      errors,
+      warnings: [],
+      duration: Date.now() - startTime,
+    };
+  }
+
   private async executeScenario(
     ticketId: string,
     scenario: TestScenario,
     screenshotsDir: string,
-    onStep?: (step: string, stepIndex: number, stepTotal: number) => void
+    onStep?: {
+      onStart?: (step: string, stepIndex: number, stepTotal: number) => void;
+      onEnd?: (
+        result: StepResult,
+        stepIndex: number,
+        stepTotal: number
+      ) => void;
+    }
   ): Promise<ExecutionResult> {
     const startTime = Date.now();
     const stepResults: StepResult[] = [];
     const screenshots: Screenshot[] = [];
     const errors: string[] = [];
+    const warnings: string[] = [];
+    const pageErrors: string[] = [];
 
     let context: BrowserContext | null = null;
     let page: Page | null = null;
 
     try {
+      this.pendingPostLoginUrl = null;
       context = await this.browser!.newContext({
         viewport: { width: 1920, height: 1080 },
         userAgent: 'Mozilla/5.0 (QA Bot) Playwright/1.40',
@@ -186,7 +541,7 @@ export class TestExecutor {
       });
 
       page.on('pageerror', (error) => {
-        errors.push(`Page error: ${error.message}`);
+        pageErrors.push(`Page error: ${error.message}`);
       });
 
       const networkErrors: string[] = [];
@@ -207,7 +562,8 @@ export class TestExecutor {
       for (let i = 0; i < scenario.steps.length; i++) {
         const step = scenario.steps[i];
         const stepStartTime = Date.now();
-        onStep?.(step, i, scenario.steps.length);
+        const stepTotal = scenario.steps.length;
+        onStep?.onStart?.(step, i, stepTotal);
 
         try {
           logger.info(`Step ${i + 1}: ${step}`);
@@ -218,31 +574,33 @@ export class TestExecutor {
             scenario
           );
 
-          const screenshotName = `${scenario.id}-step-${i + 1}.png`;
-          const screenshotPath = path.join(screenshotsDir, screenshotName);
-
-          const screenshotBuffer = await page.screenshot({
-            path: screenshotPath,
-            fullPage: true,
-          });
-
-          screenshots.push({
-            name: screenshotName,
-            path: screenshotPath,
-            buffer: screenshotBuffer,
-          });
-
-          stepResults.push({
+          const stepResult: StepResult = {
             step,
             success: true,
             duration: Date.now() - stepStartTime,
-            screenshot: screenshotName,
             ...(retriesUsed > 0 ? { retries: retriesUsed } : {}),
-          });
+          };
 
-          await page.waitForTimeout(500);
+          if (!TestExecutor.isWaitOnlyStep(step)) {
+            const screenshotName = `${scenario.id}-step-${i + 1}.png`;
+            const screenshotPath = path.join(screenshotsDir, screenshotName);
+            const screenshotBuffer = await page.screenshot({
+              path: screenshotPath,
+              fullPage: false,
+            });
+            screenshots.push({
+              name: screenshotName,
+              path: screenshotPath,
+              buffer: screenshotBuffer,
+            });
+            stepResult.screenshot = screenshotName;
+          }
+
+          stepResults.push(stepResult);
+          onStep?.onEnd?.(stepResult, i, stepTotal);
         } catch (error: any) {
-          logger.error(`Step failed: ${step}`, error.message);
+          const errorMessage = TestExecutor.formatErrorMessage(error);
+          logger.error(`Step failed: ${step}`, errorMessage);
 
           const errorScreenshotName = `${scenario.id}-step-${i + 1}-ERROR.png`;
           const errorScreenshotPath = path.join(
@@ -251,10 +609,12 @@ export class TestExecutor {
           );
 
           try {
+            await this.injectErrorBanner(page, errorMessage);
             const errorBuffer = await page.screenshot({
               path: errorScreenshotPath,
               fullPage: true,
             });
+            await this.removeErrorBanner(page);
 
             screenshots.push({
               name: errorScreenshotName,
@@ -263,7 +623,7 @@ export class TestExecutor {
               annotations: [
                 {
                   type: 'error',
-                  text: error.message,
+                  text: errorMessage,
                   x: 50,
                   y: 50,
                 },
@@ -271,22 +631,35 @@ export class TestExecutor {
             });
           } catch (screenshotError) {
             logger.error('Failed to take error screenshot:', screenshotError);
+            try {
+              await this.removeErrorBanner(page);
+            } catch {
+              /* page may already be gone */
+            }
           }
 
-          stepResults.push({
+          const stepResult: StepResult = {
             step,
             success: false,
             duration: Date.now() - stepStartTime,
-            error: error.message,
+            error: errorMessage,
             screenshot: errorScreenshotName,
-          });
+          };
+          stepResults.push(stepResult);
+          onStep?.onEnd?.(stepResult, i, stepTotal);
 
-          errors.push(`Step ${i + 1} failed: ${error.message}`);
+          errors.push(`Step ${i + 1} failed: ${errorMessage}`);
+          break; // fail-fast: stop remaining steps in this scenario
         }
       }
 
       if (consoleErrors.length > 0) {
-        errors.push(`Console errors: ${consoleErrors.join(', ')}`);
+        const unique = [...new Set(consoleErrors)].slice(0, 10);
+        warnings.push(`Console errors: ${unique.join('; ')}`);
+      }
+
+      if (pageErrors.length > 0) {
+        errors.push(...pageErrors);
       }
 
       if (this.plugins.networkGuard && networkErrors.length > 0) {
@@ -294,7 +667,11 @@ export class TestExecutor {
         errors.push(`Network errors: ${unique.join('; ')}`);
       }
 
-      const success = stepResults.every((r) => r.success) && errors.length === 0;
+      const stepsOk = stepResults.every((r) => r.success);
+      const success =
+        stepsOk &&
+        pageErrors.length === 0 &&
+        !(this.plugins.networkGuard && networkErrors.length > 0);
 
       return {
         success,
@@ -303,11 +680,12 @@ export class TestExecutor {
         steps: stepResults,
         screenshots,
         errors,
+        warnings,
         duration: Date.now() - startTime,
       };
     } catch (error: any) {
       logger.error('Scenario execution failed:', error);
-      errors.push(`Scenario failed: ${error.message}`);
+      errors.push(`Scenario failed: ${TestExecutor.formatErrorMessage(error)}`);
 
       return {
         success: false,
@@ -316,6 +694,7 @@ export class TestExecutor {
         steps: stepResults,
         screenshots,
         errors,
+        warnings,
         duration: Date.now() - startTime,
       };
     } finally {
@@ -323,6 +702,65 @@ export class TestExecutor {
         await context.close();
       }
     }
+  }
+
+  /** True when the step only waits (no UI change worth capturing). */
+  static isWaitOnlyStep(step: string): boolean {
+    const lower = step.toLowerCase().trim();
+    return (
+      /^(esperar|wait)\b/.test(lower) ||
+      /^aguardar\b/.test(lower) ||
+      /\besperar\s+\d+\s*(segundos?|seconds?|ms|milisegundos?)/i.test(lower)
+    );
+  }
+
+  static formatErrorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    return String(error);
+  }
+
+  private async injectErrorBanner(page: Page, message: string): Promise<void> {
+    const text = message.slice(0, 280);
+    await page.evaluate((msg) => {
+      // Runs in the browser; avoid Node TS needing DOM libs.
+      const g = globalThis as any;
+      const doc = g.document;
+      if (!doc) return;
+      const id = '__qatin_error_banner__';
+      doc.getElementById(id)?.remove();
+      const el = doc.createElement('div');
+      el.id = id;
+      el.setAttribute('data-qatin-error-banner', '1');
+      el.textContent = msg;
+      Object.assign(el.style, {
+        position: 'fixed',
+        top: '0',
+        left: '0',
+        right: '0',
+        zIndex: '2147483647',
+        padding: '12px 16px',
+        background: 'rgba(180, 35, 24, 0.92)',
+        color: '#fff',
+        fontFamily: 'ui-sans-serif, system-ui, sans-serif',
+        fontSize: '14px',
+        lineHeight: '1.35',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+        pointerEvents: 'none',
+      });
+      doc.documentElement.appendChild(el);
+    }, text);
+  }
+
+  private async removeErrorBanner(page: Page): Promise<void> {
+    await page
+      .evaluate(() => {
+        const doc = (globalThis as any).document;
+        doc?.getElementById('__qatin_error_banner__')?.remove();
+      })
+      .catch(() => undefined);
   }
 
   /** Returns number of retries used after the first attempt. */
@@ -373,10 +811,18 @@ export class TestExecutor {
       await page
         .waitForLoadState('networkidle', { timeout: 5000 })
         .catch(() => undefined);
+      // Auth wall: remember the intended deep link so login can restore it.
+      if (this.isLoginUrl(page.url()) && !this.isLoginUrl(url)) {
+        this.pendingPostLoginUrl = url;
+      }
       return;
     }
 
-    if (/\bclick\b|\bclic\b|\bpulsar\b|\bpresionar\b/.test(stepLower)) {
+    if (
+      /\bclick\b|\bclic\b|\bpulsar\b|\bpresionar\b|\bconfirmar\b|\bguardar\b|\benviar\b/.test(
+        stepLower
+      )
+    ) {
       await this.withSelectorAction(
         page,
         processedStep,
@@ -389,6 +835,18 @@ export class TestExecutor {
           if (textMatch) {
             await page.click(`text=${textMatch[1]}`);
             return true;
+          }
+          // Vague "Confirmar la acción principal" → try primary submit.
+          if (/\bconfirmar\b|\bguardar\b|\benviar\b/.test(stepLower)) {
+            const submit = page
+              .locator(
+                'button[type="submit"], input[type="submit"], button:has-text("Guardar"), button:has-text("Confirmar"), button:has-text("Enviar"), button:has-text("Crear")'
+              )
+              .first();
+            if (await submit.isVisible().catch(() => false)) {
+              await submit.click();
+              return true;
+            }
           }
           return false;
         }
@@ -423,7 +881,9 @@ export class TestExecutor {
             }
           }
           if (!value) {
-            throw new Error('No value to fill');
+            throw new Error(
+              "No value to fill: el paso debe incluir el valor entre comillas (ej. Completar el campo 'Cliente' con 'ACME')"
+            );
           }
           await page.fill(selector, value);
         }
@@ -510,8 +970,18 @@ export class TestExecutor {
         processedStep,
         scenario,
         async (selector) => {
-          if (!valueMatch) throw new Error('No select value');
+          if (!valueMatch) {
+            throw new Error(
+              "No select value: el paso debe incluir la opción entre comillas (ej. Seleccionar 'Agroinsumos')"
+            );
+          }
           await page.selectOption(selector, valueMatch[1]);
+        },
+        async () => {
+          // Non-<select> UIs: click the option text if quoted.
+          if (!valueMatch) return false;
+          await page.click(`text=${valueMatch[1]}`);
+          return true;
         }
       );
       return;
@@ -585,19 +1055,28 @@ export class TestExecutor {
       );
     }
 
-    if (!page.url().startsWith('http')) {
-      await page.goto(this.baseUrl, { waitUntil: 'domcontentloaded' });
+    const loginUrl = this.isLoginUrl(this.baseUrl)
+      ? this.baseUrl
+      : `${this.baseUrl.replace(/\/$/, '')}/login`;
+
+    if (!page.url().startsWith('http') || !this.isLoginUrl(page.url())) {
+      await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
     }
 
     const emailSelectors = [
       'input[type="email"]',
+      'input[placeholder*="email" i]',
+      'input[placeholder*="mail" i]',
       'input[name*="email" i]',
       'input[id*="email" i]',
       'input[autocomplete="username"]',
       'input[name*="user" i]',
+      '.login-input[type="email"]',
     ];
     const passwordSelectors = [
       'input[type="password"]',
+      'input[placeholder*="contraseña" i]',
+      'input[placeholder*="password" i]',
       'input[name*="password" i]',
       'input[id*="password" i]',
       'input[autocomplete="current-password"]',
@@ -605,10 +1084,11 @@ export class TestExecutor {
     const submitSelectors = [
       'button[type="submit"]',
       'input[type="submit"]',
+      'button:has-text("ENTRAR")',
+      'button:has-text("Entrar")',
       'button:has-text("Iniciar")',
       'button:has-text("Login")',
       'button:has-text("Sign in")',
-      'button:has-text("Entrar")',
     ];
 
     const findVisible = async (selectors: string[]) => {
@@ -621,10 +1101,26 @@ export class TestExecutor {
       return null;
     };
 
+    // SPA login forms often appear after Angular boots.
+    try {
+      await page
+        .locator('input[type="email"], input[type="password"]')
+        .first()
+        .waitFor({ state: 'visible', timeout: 20000 });
+    } catch {
+      // fall through to selector scan / retry
+    }
+
     let email = await findVisible(emailSelectors);
     if (!email) {
-      const loginUrl = `${this.baseUrl.replace(/\/$/, '')}/login`;
-      await page.goto(loginUrl, { waitUntil: 'domcontentloaded' });
+      await page.goto(loginUrl, { waitUntil: 'networkidle' }).catch(() =>
+        page.goto(loginUrl, { waitUntil: 'domcontentloaded' })
+      );
+      await page
+        .locator('input[type="email"], input[type="password"]')
+        .first()
+        .waitFor({ state: 'visible', timeout: 15000 })
+        .catch(() => undefined);
       email = await findVisible(emailSelectors);
     }
     if (!email) {
@@ -636,6 +1132,9 @@ export class TestExecutor {
       throw new Error('No se encontró el campo de password para login');
     }
 
+    const returnUrl = page.url();
+    const returnIsLogin = this.isLoginUrl(returnUrl);
+
     await email.fill(this.testUserEmail);
     await password.fill(this.testUserPassword);
 
@@ -646,9 +1145,71 @@ export class TestExecutor {
       await password.press('Enter');
     }
 
-    await page
-      .waitForLoadState('networkidle', { timeout: 10000 })
-      .catch(() => undefined);
+    // Duo (and similar MFA) keeps the login form up while approving.
+    // networkidle returns too early — wait until the form is actually gone.
+    await this.waitForLoginComplete(page);
+
+    // Prefer the deep link remembered from a prior navigate that hit the auth wall.
+    const deepLink = this.pendingPostLoginUrl;
+    this.pendingPostLoginUrl = null;
+    const restoreTarget =
+      deepLink || (!returnIsLogin ? returnUrl : null);
+
+    if (
+      restoreTarget &&
+      page.url().split('?')[0] !== restoreTarget.split('?')[0]
+    ) {
+      await page.goto(restoreTarget, { waitUntil: 'domcontentloaded' });
+      await this.waitForLoginComplete(page);
+    }
+  }
+
+  private isLoginUrl(url: string): boolean {
+    try {
+      return /\/login(?:\/|$|\?)/i.test(new URL(url).pathname);
+    } catch {
+      return /\/login/i.test(url);
+    }
+  }
+
+  /** Wait until MFA/Duo finishes and the login form leaves the page. */
+  private async waitForLoginComplete(page: Page): Promise<void> {
+    const timeout = parseInt(process.env.LOGIN_TIMEOUT_MS || '120000', 10);
+    const deadline = Date.now() + timeout;
+
+    while (Date.now() < deadline) {
+      if (page.isClosed()) {
+        throw new Error('Browser cerrado durante el login');
+      }
+
+      const onLogin = this.isLoginUrl(page.url());
+      const passwordVisible = await page
+        .locator('input[type="password"]')
+        .first()
+        .isVisible()
+        .catch(() => false);
+
+      if (!onLogin || !passwordVisible) {
+        await page
+          .waitForLoadState('domcontentloaded')
+          .catch(() => undefined);
+        return;
+      }
+
+      await page.waitForTimeout(500);
+    }
+
+    const duoStillWaiting = await page
+      .getByText(/Duo Mobile/i)
+      .first()
+      .isVisible()
+      .catch(() => false);
+
+    throw new Error(
+      duoStillWaiting
+        ? `Login no completó tras ${Math.round(timeout / 1000)}s (sigue esperando Duo Mobile)`
+        : `Login no completó tras ${Math.round(timeout / 1000)}s`
+    );
   }
 
   private async withSelectorAction(

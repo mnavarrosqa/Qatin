@@ -2,7 +2,6 @@ import { testQueue } from './queue';
 import { getJiraClient } from './clients/jira-mcp-client';
 import type { JiraMcpClient } from './clients/jira-mcp-client';
 import {
-  TicketAnalyzer,
   createSyntheticTicket,
   TestStrategy,
 } from './agents/ticket-analyzer';
@@ -10,10 +9,9 @@ import { TestExecutor, ExecutionResult } from './agents/test-executor';
 import { logger } from './utils/logger';
 import {
   getDb,
-  getRunMemory,
-  formatRunMemoryContext,
   saveRunMemory,
 } from './db';
+import { buildFailureNotes } from './agents/qa-memory';
 import {
   progressPayload,
   type RunProgressState,
@@ -23,8 +21,12 @@ import {
   assertRunNotCancelled,
   finalizeTestRun,
   RunCancelledError,
-} from './runs/manage';import { LlmProvider } from './llm';
-import { isInstalled } from './plugins';
+} from './runs/manage';
+import {
+  buildStrategyFromSavedCases,
+  CASES_REQUIRED_ERROR,
+} from './runs/strategy-from-cases';
+import { LlmProvider } from './llm';
 import dotenv from 'dotenv';
 import { ENV_PATH, ensureAppDirs } from './paths';
 
@@ -81,11 +83,6 @@ async function startWorker() {
     const label = ticketId || `job-${job.id}`;
     logger.info(`Processing job ${job.id} for ${label} (source=${source})`);
 
-    const engramOn = isInstalled('engram');
-    const analyzeOptions = {
-      memoryContext: undefined as string | undefined,
-    };
-
     if (runId) {
       assertRunNotCancelled(runId);
       writeRunProgress(runId, {
@@ -114,52 +111,36 @@ async function startWorker() {
         ticket = await jiraClient.getIssue(ticketId);
       }
 
-      if (engramOn) {
-        const memories = getRunMemory({
-          projectId: projectId ?? null,
-          ticketKey: ticket.key,
-          limit: 5,
-        });
-        const ctx = formatRunMemoryContext(memories);
-        if (ctx) {
-          analyzeOptions.memoryContext = ctx;
-          logger.info(`[${label}] Engram loaded ${memories.length} memories`);
-        }
-      }
-
       job.progress(30);
       assertRunNotCancelled(runId);
 
-      let testStrategy: TestStrategy;
+      let testStrategy: TestStrategy | null = null;
       if (providedStrategy?.scenarios?.length) {
         logger.info(
           `[${label}] Using provided test strategy with ${providedStrategy.scenarios.length} scenarios`
         );
         testStrategy = providedStrategy;
-      } else {
-        logger.info(`[${label}] Analyzing ticket...`);
-        writeRunProgress(runId, {
-          phase: 'analyzing',
-          label: 'Preparando casos',
-        });
-
-        const analyzer = new TicketAnalyzer({
-          provider: projectConfig?.llmProvider,
-          model: projectConfig?.llmModel,
-          baseUrl: projectConfig?.llmBaseUrl,
-        });
-
-        try {
-          testStrategy = await analyzer.analyzeTicket(ticket, analyzeOptions);
-        } catch (error) {
-          logger.warn(`[${label}] AI analysis failed, using fallback strategy`, error);
-          testStrategy = await analyzer.generateFallbackStrategy(ticket, analyzeOptions);
+      } else if (projectId && ticket.key) {
+        testStrategy = buildStrategyFromSavedCases(projectId, ticket.key);
+        if (testStrategy) {
+          logger.info(
+            `[${label}] Loaded ${testStrategy.scenarios.length} saved case(s) for ${ticket.key}`
+          );
         }
-
-        logger.info(
-          `[${label}] Generated test strategy with ${testStrategy.scenarios.length} scenarios`
-        );
       }
+
+      if (!testStrategy?.scenarios?.length) {
+        throw new Error(CASES_REQUIRED_ERROR);
+      }
+
+      writeRunProgress(runId, {
+        phase: 'analyzing',
+        label: `Cargando ${testStrategy.scenarios.length} caso(s) guardados`,
+      });
+
+      logger.info(
+        `[${label}] Ready to execute ${testStrategy.scenarios.length} scenario(s)`
+      );
 
       job.progress(50);
       assertRunNotCancelled(runId);
@@ -182,6 +163,13 @@ async function startWorker() {
         testUserPassword: projectConfig?.testUserPassword,
       });
 
+      if (projectConfig?.testUserEmail) {
+        process.env.TEST_USER_EMAIL = projectConfig.testUserEmail;
+      }
+      if (projectConfig?.testUserPassword) {
+        process.env.TEST_USER_PASSWORD = projectConfig.testUserPassword;
+      }
+
       const executionResults = await testExecutor.executeTests(
         ticket.key,
         testStrategy,
@@ -191,32 +179,83 @@ async function startWorker() {
             scenarios[event.index] = {
               ...scenarios[event.index],
               status: 'running',
+              stepIndex: 0,
+              stepTotal: event.scenario.steps.length,
+              currentStep: undefined,
+              error: undefined,
             };
             writeRunProgress(runId, {
               phase: 'executing',
               label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarioIndex: event.index,
+              scenarioTotal: event.total,
+              stepIndex: undefined,
+              stepTotal: event.scenario.steps.length,
+              currentStep: undefined,
+              lastStepOk: undefined,
               scenarios: [...scenarios],
             });
-          } else if (event.type === 'step') {
+          } else if (event.type === 'step_start') {
+            scenarios[event.index] = {
+              ...scenarios[event.index],
+              status: 'running',
+              stepIndex: event.stepIndex,
+              stepTotal: event.stepTotal,
+              currentStep: event.step,
+            };
             writeRunProgress(runId, {
               phase: 'executing',
               label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarioIndex: event.index,
+              scenarioTotal: event.total,
               currentStep: event.step,
               stepIndex: event.stepIndex,
               stepTotal: event.stepTotal,
+              lastStepOk: undefined,
+              scenarios: [...scenarios],
+            });
+          } else if (event.type === 'step_end') {
+            scenarios[event.index] = {
+              ...scenarios[event.index],
+              status: 'running',
+              stepIndex: event.stepIndex,
+              stepTotal: event.stepTotal,
+              currentStep: event.step,
+              error: event.success ? undefined : event.error,
+            };
+            writeRunProgress(runId, {
+              phase: 'executing',
+              label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarioIndex: event.index,
+              scenarioTotal: event.total,
+              currentStep: event.step,
+              stepIndex: event.stepIndex,
+              stepTotal: event.stepTotal,
+              lastStepOk: event.success,
               scenarios: [...scenarios],
             });
           } else {
+            const failedStep = event.result.steps.find((s) => !s.success);
             scenarios[event.index] = {
               id: event.scenario.id,
               description: event.scenario.description,
               status: event.result.success ? 'passed' : 'failed',
               duration: event.result.duration,
-              error: event.result.errors[0],
+              stepIndex: event.result.steps.length
+                ? event.result.steps.length - 1
+                : undefined,
+              stepTotal: event.scenario.steps.length,
+              currentStep: undefined,
+              error:
+                failedStep?.error ||
+                event.result.errors[0] ||
+                undefined,
             };
             writeRunProgress(runId, {
               phase: 'executing',
               label: `Caso ${event.index + 1} de ${event.total}: ${event.scenario.description}`,
+              scenarioIndex: event.index,
+              scenarioTotal: event.total,
               scenarios: [...scenarios],
             });
           }
@@ -239,61 +278,24 @@ async function startWorker() {
         summary
       );
 
-      if (engramOn) {
-        try {
-          saveEngramMemory({
-            projectId: projectId ?? null,
-            ticketKey: ticket.key,
-            strategy: testStrategy,
-            results: executionResults,
-            summary,
-          });
-          logger.info(`[${label}] Engram saved run memory`);
-        } catch (memErr) {
-          logger.warn(`[${label}] Engram failed to save memory:`, memErr);
-        }
-      }
-
-      if (source === 'jira' && jiraClient) {
-        job.progress(90);
-        logger.info(`[${label}] Posting results to Jira...`);
-        writeRunProgress(runId, {
-          phase: 'reporting',
-          label: 'Publicando en Jira',
-          scenarios,
+      try {
+        saveEngramMemory({
+          projectId: projectId ?? null,
+          ticketKey: ticket.key,
+          strategy: testStrategy,
+          results: executionResults,
+          summary,
         });
-
-        try {
-          await jiraClient.postTestResults(ticket.key, {
-            passed: summary.passed,
-            totalTests: summary.total,
-            passedTests: summary.successful,
-            failedTests: summary.failed,
-            screenshots: allScreenshots,
-            details: detailsReport,
-            executionTime: summary.totalDuration,
-          });
-
-          await jiraClient.addLabel(
-            ticket.key,
-            summary.passed ? 'qa-passed' : 'qa-failed'
-          );
-
-          if (summary.passed) {
-            await jiraClient.transitionIssue(ticket.key, 'QA Approved');
-          } else {
-            await jiraClient.transitionIssue(ticket.key, 'QA Failed');
-          }
-        } catch (jiraError) {
-          logger.warn(`[${label}] Failed to post results to Jira:`, jiraError);
-        }
-      } else {
-        job.progress(90);
-        logger.info(`[${label}] Skipping Jira post (paste source)`);
+        logger.info(`[${label}] Saved run memory for analyzer feedback`);
+      } catch (memErr) {
+        logger.warn(`[${label}] Failed to save run memory:`, memErr);
       }
+
+      // Jira publish is opt-in after the run (UI / chat confirmation).
+      job.progress(90);
 
       const result = {
-        success: true,
+        success: summary.passed,
         ticketId: ticket.key,
         source,
         summary,
@@ -304,9 +306,18 @@ async function startWorker() {
         })),
         executionResults: executionResults.map((r) => ({
           scenarioId: r.scenarioId,
+          description: r.description,
           success: r.success,
           duration: r.duration,
           errors: r.errors,
+          warnings: r.warnings,
+          steps: r.steps.map((s) => ({
+            step: s.step,
+            success: s.success,
+            error: s.error,
+            duration: s.duration,
+            screenshot: s.screenshot,
+          })),
         })),
       };
 
@@ -345,24 +356,6 @@ async function startWorker() {
         });
         if (fin === 'cancelled' || fin === 'missing') {
           return { success: false, cancelled: true };
-        }
-      }
-
-      if (source === 'jira') {
-        try {
-          const jiraClient = await getJiraClient();
-          await jiraClient.postTestResults(ticketId, {
-            passed: false,
-            totalTests: 1,
-            passedTests: 0,
-            failedTests: 1,
-            screenshots: [],
-            details: `Error executing automated tests:\n${error.message}\n\nStack trace:\n${error.stack}`,
-            executionTime: 0,
-          });
-          await jiraClient.addLabel(ticketId, 'qa-error');
-        } catch (postError) {
-          logger.error(`[${label}] Failed to post error to Jira:`, postError);
         }
       }
 
@@ -424,25 +417,14 @@ function saveEngramMemory(opts: {
     .filter(Boolean)
     .join(' · ');
 
-  const selectorNotes: string[] = [];
-  for (const scenario of strategy.scenarios) {
-    const result = results.find((r) => r.scenarioId === scenario.id);
-    const status = result?.success ? 'ok' : 'fail';
-    if (scenario.selectors?.length) {
-      selectorNotes.push(
-        `${scenario.id}[${status}]: ${scenario.selectors.slice(0, 5).join(', ')}`
-      );
-    }
-  }
+  const notes = buildFailureNotes(results, strategy.scenarios);
 
   saveRunMemory({
     project_id: projectId,
     ticket_key: ticketKey,
     summary: memorySummary,
     outcome,
-    selectors_json: selectorNotes.length
-      ? JSON.stringify(selectorNotes)
-      : null,
+    selectors_json: notes.length ? JSON.stringify(notes) : null,
   });
 }
 
@@ -489,6 +471,13 @@ function generateDetailedReport(
       report += `\nErrors:\n`;
       for (const error of result.errors) {
         report += `  - ${error}\n`;
+      }
+    }
+
+    if (Array.isArray(result.warnings) && result.warnings.length > 0) {
+      report += `\nWarnings:\n`;
+      for (const warning of result.warnings) {
+        report += `  - ${warning}\n`;
       }
     }
 

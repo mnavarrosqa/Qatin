@@ -34,6 +34,19 @@ export interface ProjectInput {
   llm_base_url?: string | null;
 }
 
+export interface ProviderModelSuggestion {
+  id: string;
+  name: string;
+  priceLabel: string;
+  priceHint: string | null;
+  optionLabel: string;
+}
+
+export interface ProviderBaseUrlSuggestion {
+  url: string;
+  label: string;
+}
+
 export interface ProviderInfo {
   id: LlmProvider;
   label: string;
@@ -43,6 +56,8 @@ export interface ProviderInfo {
   configuredModel: string | null;
   configuredBaseUrl: string | null;
   requiresBaseUrl: boolean;
+  models: ProviderModelSuggestion[];
+  baseUrls: ProviderBaseUrlSuggestion[];
 }
 
 export interface TestRun {
@@ -56,6 +71,11 @@ export interface TestRun {
   phase: string;
   phaseLabel: string;
   currentStep: string | null;
+  stepIndex: number | null;
+  stepTotal: number | null;
+  scenarioIndex: number | null;
+  scenarioTotal: number | null;
+  progressLabel: string | null;
   created_at: string;
   updated_at: string;
   steps: RunPipelineStep[];
@@ -68,6 +88,8 @@ export interface TestRun {
     totalDuration?: number;
   } | null;
   error: string | null;
+  jiraPosted: boolean;
+  canPublishToJira: boolean;
   followPath: string;
 }
 
@@ -83,6 +105,9 @@ export type RunScenarioView = {
   status: 'pending' | 'running' | 'passed' | 'failed';
   duration?: number;
   error?: string;
+  stepIndex?: number;
+  stepTotal?: number;
+  currentStep?: string;
 };
 
 export interface TestRunDetail extends TestRun {
@@ -285,6 +310,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  testJiraConnection: (body: {
+    jira_url?: string;
+    jira_email?: string;
+    jira_api_token?: string;
+  }) =>
+    request<{ ok: true; displayName: string; latencyMs: number }>(
+      '/api/jira/test',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20_000),
+      }
+    ),
+  testXrayConnection: (body: {
+    xray_client_id?: string;
+    xray_client_secret?: string;
+  }) =>
+    request<{ ok: true; latencyMs: number }>('/api/xray/test', {
+      method: 'POST',
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    }),
   listRuns: (limit = 50, projectId?: number | null) => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (projectId != null) params.set('project_id', String(projectId));
@@ -300,6 +347,16 @@ export const api = {
   },
   cancelRun: (id: number) =>
     request<{ run: TestRun }>(`/api/runs/${id}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  rerunRun: (id: number) =>
+    request<{ run: TestRun }>(`/api/runs/${id}/rerun`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  publishRunToJira: (id: number) =>
+    request<{ run: TestRun }>(`/api/runs/${id}/publish-jira`, {
       method: 'POST',
       body: JSON.stringify({}),
     }),

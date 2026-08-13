@@ -19,6 +19,11 @@ export const DATA_DIR = path.join(APP_ROOT, 'data');
 export const LOGS_DIR = path.join(APP_ROOT, 'logs');
 export const DEFAULT_DB_PATH = path.join(DATA_DIR, 'qatin.db');
 export const DEFAULT_SCREENSHOTS_DIR = path.join(APP_ROOT, 'screenshots');
+export const DEFAULT_PLAYWRIGHT_GENERATED_DIR = path.join(
+  APP_ROOT,
+  'generated',
+  'playwright'
+);
 export const ENV_PATH = path.join(APP_ROOT, '.env');
 
 /** Resolve a path relative to APP_ROOT (absolute paths unchanged). */
@@ -30,6 +35,13 @@ export function resolveAppPath(p: string): string {
 export function getScreenshotsDir(): string {
   return resolveAppPath(
     process.env.SCREENSHOTS_DIR || DEFAULT_SCREENSHOTS_DIR
+  );
+}
+
+/** Directory for generated Playwright .spec.ts exports. */
+export function getPlaywrightGeneratedDir(): string {
+  return resolveAppPath(
+    process.env.PLAYWRIGHT_GENERATED_DIR || DEFAULT_PLAYWRIGHT_GENERATED_DIR
   );
 }
 
@@ -45,7 +57,12 @@ export function getDbPath(): string {
 }
 
 export function ensureAppDirs(): void {
-  for (const dir of [DATA_DIR, LOGS_DIR, getScreenshotsDir()]) {
+  for (const dir of [
+    DATA_DIR,
+    LOGS_DIR,
+    getScreenshotsDir(),
+    getPlaywrightGeneratedDir(),
+  ]) {
     fs.mkdirSync(dir, { recursive: true });
   }
 }
