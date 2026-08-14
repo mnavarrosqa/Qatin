@@ -27,7 +27,8 @@ const DEFAULT_ANALYZER_INSTRUCTIONS_UI_FULL = `Quality rules (UI):
 - Use realistic test data coherent with the ticket domain. State them in the description AND in the steps.
 - Selector priority: [data-testid] > [role] with name > [name] > [id] > tag by type. Avoid fragile selectors like div:nth-child or generated CSS classes. If you are unsure about the real selector or label, use a reasonable placeholder — the chat agent will call suggest_selectors with headless Chrome to discover real selectors before saving.
 - URLs: use {{BASE_URL}} with realistic paths FROM THE TICKET. If the ticket does not name a path, navigate to {{BASE_URL}} and click by visible label — never invent deep links. The chat agent can call explore_app to discover real navigation paths if needed.
-- Hamburger / sidenav: many apps keep a hamburger menu even on desktop. Cases may say "Hacer click en 'F12'" without an extra menu step — the executor opens the hamburger if the label is not on screen. Optional explicit step: "Abrir el menú hamburguesa".
+- Hamburger / sidenav: many apps keep a hamburger menu even on desktop. The executor opens it if a click target is hidden. Optional step: "Abrir el menú hamburguesa". Click the visible business labels in the nav (e.g. 'Indicadores', 'Tablero'), never Angular module names.
+- Angular/code names are NOT UI: F12Module, F12RoutingModule, "módulo f12", bundle/chunk names, Capa A/B/C. If the ticket lists screens (dashboard, radiografía, plan comercial), map them to visible nav labels. Example: módulo f12 dashboard → menú 'Indicadores' → 'Tablero'. NEVER "Hacer click en 'F12'".
 
 Respect the requested coverage (see the user prompt). Each scenario must be independently executable.
 
@@ -37,6 +38,7 @@ Anti-examples (NEVER):
 - BAD: "Completar los campos con datos válidos" → GOOD: "Completar el campo 'Cliente' con 'ACME SA'"
 - BAD: "Confirmar la acción principal" → GOOD: "Hacer click en 'Guardar orden'"
 - BAD: invent deep links absent from the ticket → GOOD: open {{BASE_URL}} then click the visible entry point.
+- BAD: "Hacer click en 'F12'" because the ticket says F12Module → GOOD: click the real nav labels of the screens (e.g. 'Indicadores' then 'Tablero').
 
 Do NOT generate generic smoke tests or vague steps without fields, values, and button labels.`;
 
@@ -48,7 +50,7 @@ const DEFAULT_ANALYZER_INSTRUCTIONS_UI_COMPACT = `Rules (UI):
 - Forbidden vague steps: "datos válidos", "Confirmar la acción principal", "Completar el formulario".
 - expectedResults: one assertion per step. Visible text, URL, UI state, error.
 - URLs: {{BASE_URL}} + paths from the ticket only — never invent deep links.
-- Desktop hamburger/sidenav: executor opens it when the click target is hidden. Optional step "Abrir el menú hamburguesa".
+- Desktop hamburger/sidenav: executor opens it when the click target is hidden. Optional step "Abrir el menú hamburguesa". Never click Angular module names (F12Module, "módulo f12"); use visible nav labels.
 - Respect requested coverage. Each scenario independently executable.
 - No generic smoke tests. Every case must trace to the ticket.`;
 

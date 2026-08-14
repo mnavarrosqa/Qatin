@@ -409,6 +409,7 @@ import {
 import { generatePlaywrightSpecs } from '../src/agents/playwright-spec-generator';
 import {
   isHamburgerStep,
+  labelFromSelector,
   selectorsMatchingQuotedLabel,
 } from '../src/agents/hamburger-nav';
 
@@ -496,6 +497,8 @@ assert.deepStrictEqual(
   ]),
   ["a:has-text('F12')", "button:has-text('F12')"]
 );
+assert.strictEqual(labelFromSelector("a:has-text('F12')"), 'F12');
+assert.strictEqual(labelFromSelector('text=F12'), 'F12');
 
 {
   const generated = generatePlaywrightSpecs({
@@ -524,6 +527,7 @@ assert.deepStrictEqual(
   const content = generated.files[0]?.content || '';
   assert.ok(content.includes('clickViaNav'), 'UI spec clicks via hamburger helper');
   assert.ok(content.includes('openHamburgerMenu'), 'UI spec can open hamburger');
+  assert.ok(content.includes('button.menu-button'), 'UI spec targets .menu-button hamburgers');
   assert.ok(content.includes('revealViaNav'), 'UI spec reveals via nav before assert');
 }
 

@@ -19,6 +19,7 @@ import {
 import {
   clickViaHamburger,
   isHamburgerStep,
+  NavLabelMissingError,
   openHamburgerMenu,
   revealViaHamburger,
   selectorsMatchingQuotedLabel,
@@ -793,6 +794,9 @@ export class TestExecutor {
         return attempt;
       } catch (err: any) {
         lastError = err instanceof Error ? err : new Error(String(err));
+        if (err instanceof NavLabelMissingError) {
+          throw lastError;
+        }
         if (attempt < maxExtra) {
           const delay = 500 * (attempt + 1);
           logger.warn(
@@ -1257,6 +1261,9 @@ export class TestExecutor {
         return;
       } catch (err: any) {
         lastError = err instanceof Error ? err : new Error(String(err));
+        if (err instanceof NavLabelMissingError) {
+          throw lastError;
+        }
         if (!this.plugins.selfHeal || i === candidates.length - 1) {
           break;
         }
@@ -1296,6 +1303,7 @@ export class TestExecutor {
         const t = textMatch[1];
         push(`text=${t}`);
         push(`button:has-text("${t}")`);
+        push(`.title-menu:has-text("${t}")`);
         push(`[aria-label="${t}"]`);
       }
 
@@ -1330,6 +1338,15 @@ export class TestExecutor {
     }
 
     if (scenario.selectors && scenario.selectors.length > 0) {
+      const quoted = step.match(/['"]([^'"]+)['"]/)?.[1];
+      if (quoted) {
+        const hits = selectorsMatchingQuotedLabel(step, scenario.selectors);
+        const match = hits.find((s) =>
+          s.toLowerCase().includes(quoted.toLowerCase())
+        );
+        if (match) return match;
+      }
+
       for (const selector of scenario.selectors) {
         const selectorKeywords = selector.toLowerCase();
         const stepKeywords = step.toLowerCase();
@@ -1340,15 +1357,13 @@ export class TestExecutor {
           (stepKeywords.includes('password') &&
             selectorKeywords.includes('password')) ||
           (stepKeywords.includes('submit') &&
-            selectorKeywords.includes('submit')) ||
-          (stepKeywords.includes('button') &&
-            selectorKeywords.includes('button'))
+            selectorKeywords.includes('submit'))
         ) {
           return selector;
         }
       }
 
-      return scenario.selectors[0];
+      if (!quoted) return scenario.selectors[0];
     }
 
     return null;

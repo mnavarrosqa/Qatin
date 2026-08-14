@@ -36,7 +36,27 @@ export function selectorsMatchingQuotedLabel(
   return hits.length ? hits : scenarioSelectors;
 }
 
+export class NavLabelMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NavLabelMissingError';
+  }
+}
+
+export function labelFromSelector(selector: string): string | null {
+  const m =
+    selector.match(/has-text\(['"]([^'"]+)['"]\)/i) ||
+    selector.match(/^text=(.+)$/i) ||
+    selector.match(/aria-label=["']([^"']+)["']/i);
+  return m?.[1] ?? null;
+}
+
 const HAMBURGER_SELECTORS = [
+  'button.menu-button',
+  '.menu-button',
+  'button:has(i.material-icons:text-is("menu"))',
+  'i.material-icons:text-is("menu")',
+  '.base-header button',
   'button:has(mat-icon:text-is("menu"))',
   'button:has(mat-icon:has-text("menu"))',
   'button:has(ion-icon[name="menu"])',
@@ -53,13 +73,9 @@ const HAMBURGER_SELECTORS = [
 const DRAWER_SELECTORS = [
   'mat-sidenav.mat-drawer-opened',
   '.mat-drawer.mat-drawer-opened',
-  'mat-sidenav:not(.mat-drawer-closed)',
-  '[role="navigation"]',
-  'aside[class*="sidenav" i]',
-  '.mat-mdc-sidenav',
+  '.mat-drawer-opened',
   'ion-menu.menu-pane-visible',
   'ion-menu.show-menu',
-  '[class*="sidenav"][class*="open" i]',
 ];
 
 async function waitVisible(locator: Locator, timeout: number): Promise<boolean> {
@@ -77,7 +93,8 @@ export async function isNavDrawerOpen(page: Page): Promise<boolean> {
       return true;
     }
   }
-  return false;
+  const drawer = page.locator('.mat-drawer, mat-sidenav').first();
+  return drawer.isVisible().catch(() => false);
 }
 
 /** Avoid toggling the same page's hamburger closed during self-heal retries. */
@@ -94,30 +111,47 @@ export async function openHamburgerMenu(page: Page): Promise<boolean> {
   for (const sel of HAMBURGER_SELECTORS) {
     const loc = page.locator(sel).first();
     if (!(await loc.isVisible().catch(() => false))) continue;
-    await loc.click({ timeout: HAMBURGER_OPEN_MS });
-    await page.waitForTimeout(350);
+    try {
+      await loc.click({ timeout: HAMBURGER_OPEN_MS });
+    } catch {
+      await loc.click({ timeout: HAMBURGER_OPEN_MS, force: true });
+    }
+    await page.waitForTimeout(400);
+    await page
+      .locator('.title-menu, .mat-drawer.mat-drawer-opened, .mat-drawer-opened')
+      .first()
+      .waitFor({ state: 'visible', timeout: 3000 })
+      .catch(() => undefined);
     hamburgerOpenedAt.set(page, Date.now());
     logger.info(`Opened hamburger menu via ${sel}`);
     return true;
   }
 
-  const toolbarBtn = page
-    .locator(
-      'header button, mat-toolbar button, .mat-toolbar button, [role="banner"] button'
-    )
-    .first();
+  const toolbarBtn = page.locator('.base-header button, .menu-button').first();
   if (await toolbarBtn.isVisible().catch(() => false)) {
-    const text = ((await toolbarBtn.innerText().catch(() => '')) || '').trim();
-    if (text.length <= 8) {
-      await toolbarBtn.click({ timeout: HAMBURGER_OPEN_MS });
-      await page.waitForTimeout(350);
-      hamburgerOpenedAt.set(page, Date.now());
-      logger.info('Opened hamburger menu via first toolbar icon button');
-      return true;
-    }
+    await toolbarBtn.click({ timeout: HAMBURGER_OPEN_MS }).catch(() =>
+      toolbarBtn.click({ timeout: HAMBURGER_OPEN_MS, force: true })
+    );
+    await page.waitForTimeout(400);
+    hamburgerOpenedAt.set(page, Date.now());
+    logger.info('Opened hamburger menu via .base-header button');
+    return true;
   }
 
   return false;
+}
+
+export async function visibleNavLabels(page: Page): Promise<string[]> {
+  const items = page.locator('.title-menu');
+  const n = await items.count();
+  const out: string[] = [];
+  for (let i = 0; i < Math.min(n, 40); i++) {
+    const item = items.nth(i);
+    if (!(await item.isVisible().catch(() => false))) continue;
+    const text = ((await item.textContent()) || '').trim();
+    if (text) out.push(text);
+  }
+  return out;
 }
 
 /** If the quoted/target locator is hidden, open the hamburger/sidenav first. */
@@ -142,6 +176,40 @@ export async function clickViaHamburger(
     return;
   }
   logger.info(`Target not on screen (${selector}); opening hamburger menu`);
-  await openHamburgerMenu(page);
-  await loc.click({ timeout: clickTimeout });
+  const opened = await openHamburgerMenu(page);
+  const label = labelFromSelector(selector);
+  if (label) {
+    const exact = new RegExp(`^\\s*${escapeRegExp(label)}\\s*$`, 'i');
+    const row = page
+      .locator('.subtree-item, .main-item, app-navbar-item')
+      .filter({ has: page.locator('.title-menu').filter({ hasText: exact }) })
+      .first();
+    const title = page.locator('.title-menu').filter({ hasText: exact }).first();
+    const menuItem = (await row.count()) ? row : title;
+    if (await waitVisible(menuItem, 2500)) {
+      try {
+        await menuItem.click({ timeout: clickTimeout });
+      } catch {
+        await menuItem.click({ timeout: clickTimeout, force: true });
+      }
+      return;
+    }
+  }
+  if (await waitVisible(loc, 2500)) {
+    await loc.click({ timeout: clickTimeout });
+    return;
+  }
+  const visible = opened ? await visibleNavLabels(page) : [];
+  throw new NavLabelMissingError(
+    `No se encontró el control (${selector}) en pantalla ni en el menú hamburguesa.` +
+      (visible.length
+        ? ` Ítems visibles del menú: ${visible.slice(0, 20).join(', ')}.`
+        : opened
+          ? ' El menú se abrió pero el label no está.'
+          : ' No se pudo abrir el menú hamburguesa.')
+  );
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
