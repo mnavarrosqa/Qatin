@@ -291,8 +291,8 @@ export function RunsPage() {
         <div>
           <h1>Ejecuciones</h1>
           <p>
-            Corridas de Playwright de{' '}
-            {activeProject ? activeProject.name : 'este proyecto'}, paso a paso.
+            Historial de Playwright de{' '}
+            {activeProject ? activeProject.name : 'este proyecto'}.
           </p>
         </div>
         <label className="chat-project-picker">
@@ -317,27 +317,45 @@ export function RunsPage() {
       {error && <p className="error">{error}</p>}
 
       {typeof projectId !== 'number' ? (
-        <section className="panel">
-          <p className="empty">
+        <div className="empty-state">
+          <h2>
+            {projects.length === 0
+              ? 'No hay proyectos'
+              : 'Elegí un proyecto'}
+          </h2>
+          <p>
             {projects.length === 0 ? (
               <>
-                No hay proyectos.{' '}
-                <Link to="/projects">Creá uno</Link> para correr tests.
+                Sin proyecto no hay entorno ni historial.{' '}
+                <Link to="/projects">Creá uno</Link> y volvé.
               </>
             ) : (
-              'Elegí un proyecto para ver sus ejecuciones.'
+              'Las corridas de Playwright viven por proyecto.'
             )}
           </p>
-        </section>
+          {projects.length === 0 ? (
+            <div className="actions">
+              <Link className="btn" to="/projects">
+                <Icon name="folder" size={14} />
+                Ir a Proyectos
+              </Link>
+            </div>
+          ) : null}
+        </div>
       ) : runs.length === 0 && !error ? (
-        <section className="panel">
-          <p className="empty">
-            Todavía no hay ejecuciones en{' '}
-            {activeProject?.name || 'este proyecto'}.{' '}
-            <Link to="/">Pedile al chat</Link> que pruebe un ticket con
-            Playwright.
+        <div className="empty-state">
+          <h2>Todavía no hay ejecuciones</h2>
+          <p>
+            Pedile al chat que pruebe un ticket con Playwright en{' '}
+            {activeProject?.name || 'este proyecto'}.
           </p>
-        </section>
+          <div className="actions">
+            <Link className="btn" to="/">
+              <Icon name="chat" size={14} />
+              Ir al chat
+            </Link>
+          </div>
+        </div>
       ) : (
         <div className="runs-layout">
           <section className="runs-list" aria-label="Historial">

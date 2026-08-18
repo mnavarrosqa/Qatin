@@ -8,10 +8,13 @@ export function AppLayout() {
 
   return (
     <div className={`app-shell${isChat ? ' app-shell-chat' : ''}`}>
+      <a className="skip-link" href="#main-content">
+        Ir al contenido
+      </a>
       <aside className={`sidebar${isChat ? ' sidebar-chat' : ''}`}>
         <div className="sidebar-top">
           <h1 className="brand">Qatin</h1>
-          <p className="brand-sub">QA para tickets</p>
+          <p className="brand-sub">Tickets, casos, evidencias</p>
           <nav className="nav">
             <NavLink to="/" end>
               <Icon name="chat" />
@@ -36,7 +39,7 @@ export function AppLayout() {
           className={isChat ? 'chat-sessions-slot' : 'chat-sessions-slot-hidden'}
         />
       </aside>
-      <main className={`main${isChat ? ' main-chat' : ''}`}>
+      <main id="main-content" className={`main${isChat ? ' main-chat' : ''}`} tabIndex={-1}>
         <div
           className={isChat ? 'chat-route' : 'chat-route-hidden'}
           aria-hidden={!isChat}

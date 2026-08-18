@@ -509,9 +509,8 @@ export function SettingsPage() {
       <header className="page-head">
         <h1>Configuración</h1>
         <p>
-          Defaults globales de LLM, claves API, Jira MCP, instrucciones de
-          agentes, plugins de runtime y skills del chat. La config del proyecto
-          pisa los defaults de LLM cuando está seteada.
+          Modelo, claves, Jira y lo que el chat puede hacer. Si un proyecto
+          define su propio modelo, ese gana.
         </p>
       </header>
 
@@ -553,8 +552,7 @@ export function SettingsPage() {
         {tab === 'model' && (
           <div role="tabpanel" id="panel-model" aria-labelledby="tab-model">
             <p className="panel-lead">
-              Proveedor y modelo por defecto cuando un proyecto no los
-              sobreescribe.
+              Proveedor y modelo cuando un proyecto no los pisa.
             </p>
             <form onSubmit={onSubmit}>
               <div className="field">
@@ -841,7 +839,7 @@ export function SettingsPage() {
               del tier activo. Con modelos chicos (tier compact), si el custom
               es muy largo se agrega un recordatorio automático de modo compacto.
             </p>
-            <p className="hint" style={{ marginBottom: '1rem' }}>
+            <p className="hint hint-block">
               Tier activo: <strong>{promptTier}</strong>{' '}
               {promptTier === 'compact'
                 ? '(modelo chico — prompts cortos)'

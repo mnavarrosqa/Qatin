@@ -30,6 +30,7 @@ import {
 import { getFollowUps, followUpsLabel } from '../chatFollowUps';
 import { MessageBody } from '../chatMarkdown';
 import { Icon, type IconName } from '../components/Icon';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import {
   getActiveProjectId,
   getActiveProjectVersion,
@@ -373,6 +374,8 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   const [sessionsSlot, setSessionsSlot] = useState<HTMLElement | null>(null);
   const [query, setQuery] = useState('');
   const [showJump, setShowJump] = useState(false);
+  const [sessionsOpen, setSessionsOpen] = useState(true);
+  const [pendingDelete, setPendingDelete] = useState<ChatSession | null>(null);
 
   const liveForActive =
     generation && generation.sessionId === activeId ? generation : null;
@@ -577,6 +580,11 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     setSessionsSlot(document.getElementById('chat-sessions-root'));
   }, [active]);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 860px)');
+    if (mq.matches) setSessionsOpen(false);
+  }, []);
 
   // When returning to chat, sync from server if the turn already finished
   const wasActiveRef = useRef(active);
@@ -785,20 +793,34 @@ export function ChatPage({ active = true }: { active?: boolean }) {
   );
 
   const sessionsPanel = (
-    <aside className="chat-sessions" aria-label="Conversaciones">
+    <aside
+      className={`chat-sessions${sessionsOpen ? '' : ' is-collapsed'}`}
+      aria-label="Conversaciones"
+    >
       <div className="chat-sessions-head">
         <h2>Chats</h2>
         <button
           type="button"
-          className="btn btn-icon"
+          className="chat-sessions-toggle"
+          aria-expanded={sessionsOpen}
+          onClick={() => setSessionsOpen((open) => !open)}
+        >
+          Chats
+          <Icon name="chevronDown" size={14} />
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost btn-compact chat-new-btn"
           onClick={newChat}
           aria-label="Nuevo chat"
-          title="Nuevo"
+          title="Nuevo chat"
         >
           <Icon name="plus" size={14} />
+          <span className="chat-new-label">Nuevo</span>
         </button>
       </div>
 
+      <div className="chat-sessions-body">
       {sessions.length > 0 ? (
         <label className="chat-sessions-search">
           <Icon name="search" size={14} />
@@ -855,7 +877,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
                       title="Eliminar"
                       onClick={(ev) => {
                         ev.stopPropagation();
-                        deleteSession(s.id);
+                        setPendingDelete(s);
                       }}
                     >
                       <Icon name="trash" size={14} />
@@ -867,6 +889,7 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           ))}
         </div>
       )}
+      </div>
     </aside>
   );
 
@@ -924,8 +947,14 @@ export function ChatPage({ active = true }: { active?: boolean }) {
             </select>
           </div>
         </header>
+        {needsProject ? (
+          <p className="chat-project-hint">
+            Así sé a qué entorno y tickets apuntar. También podés nombrarlo en
+            el chat.
+          </p>
+        ) : null}
 
-        {noProjects && (
+        {noProjects && viewMessages.length > 0 && (
           <div className="chat-banner warn" role="status">
             <div className="chat-banner-body">
               <Icon name="warning" />
@@ -941,21 +970,6 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               <Icon name="folder" size={14} />
               Ir a Proyectos
             </Link>
-          </div>
-        )}
-
-        {needsProject && (
-          <div className="chat-banner" role="status">
-            <div className="chat-banner-body">
-              <Icon name="folder" />
-              <div>
-                <strong>Elegí un proyecto</strong>
-                <p>
-                  Así sé a qué entorno y tickets apuntar. También podés nombrarlo
-                  en el chat.
-                </p>
-              </div>
-            </div>
           </div>
         )}
 
@@ -986,26 +1000,44 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           >
           {viewMessages.length === 0 && !viewBusy && (
             <div className="chat-empty">
-              <p className="chat-empty-kicker">Empezá por acá</p>
-              <h2 className="chat-empty-title">¿Qué querés hacer?</h2>
-              <p className="chat-empty-lead">
-                Pedilo en español natural. Armamos casos, exportamos a Xray o
-                generamos scripts Playwright y los corremos con evidencias.
-              </p>
-              <div className="chat-suggestions">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    key={s.label}
-                    type="button"
-                    className="chat-suggestion"
-                    onClick={() => applySuggestion(s)}
-                    disabled={noProjects && s.label !== '¿Qué proyectos hay?'}
-                  >
-                    <Icon name={s.icon} size={14} />
-                    {s.label}
-                  </button>
-                ))}
-              </div>
+              {noProjects ? (
+                <>
+                  <p className="chat-empty-kicker">Primero el entorno</p>
+                  <h2 className="chat-empty-title">Falta un proyecto</h2>
+                  <p className="chat-empty-lead">
+                    Sin proyecto no hay URL de test ni Jira. Creá uno y volvé
+                    para armar casos o correr Playwright.
+                  </p>
+                  <div className="actions">
+                    <Link className="btn" to="/projects">
+                      <Icon name="folder" size={14} />
+                      Crear proyecto
+                    </Link>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="chat-empty-kicker">Empezá por acá</p>
+                  <h2 className="chat-empty-title">¿Qué querés hacer?</h2>
+                  <p className="chat-empty-lead">
+                    Pedilo en español natural. Armamos casos, exportamos a Xray o
+                    generamos scripts Playwright y los corremos con evidencias.
+                  </p>
+                  <div className="chat-suggestions">
+                    {SUGGESTIONS.map((s) => (
+                      <button
+                        key={s.label}
+                        type="button"
+                        className="chat-suggestion"
+                        onClick={() => applySuggestion(s)}
+                      >
+                        <Icon name={s.icon} size={14} />
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -1225,18 +1257,21 @@ export function ChatPage({ active = true }: { active?: boolean }) {
               placeholder={
                 noProjects
                   ? 'Configurá un proyecto para empezar…'
-                  : needsProject
-                    ? 'Elegí un proyecto o escribí su nombre…'
-                    : 'Ej: ¿Qué entendés del ticket ABC-12?'
+                  : viewBusy
+                    ? 'Podés ir escribiendo el siguiente…'
+                    : needsProject
+                      ? 'Elegí un proyecto o escribí su nombre…'
+                      : 'Ej: ¿Qué entendés del ticket ABC-12?'
               }
               rows={1}
-              disabled={viewBusy}
               onKeyDown={onComposerKey}
               aria-label="Mensaje"
             />
             <div className="chat-composer-bar">
               <span className="chat-composer-hint">
-                Enter envía · Shift+Enter nueva línea
+                {viewBusy
+                  ? 'Podés ir escribiendo el siguiente'
+                  : 'Enter envía · Shift+Enter nueva línea'}
               </span>
               <div className="chat-composer-actions">
                 {viewBusy ? (
@@ -1264,6 +1299,25 @@ export function ChatPage({ active = true }: { active?: boolean }) {
           </div>
         </form>
       </section>
+
+      <ConfirmDialog
+        open={Boolean(pendingDelete)}
+        title="¿Borrar este chat?"
+        body={
+          pendingDelete
+            ? `Se elimina “${pendingDelete.title}”. No se puede deshacer.`
+            : ''
+        }
+        confirmLabel="Borrar"
+        danger
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (!pendingDelete) return;
+          const id = pendingDelete.id;
+          setPendingDelete(null);
+          void deleteSession(id);
+        }}
+      />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import {
   api,
@@ -8,6 +8,7 @@ import {
   type LlmProvider,
 } from '../api';
 import { Icon } from '../components/Icon';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 import { LlmModelFields } from '../components/LlmModelFields';
 
 const emptyForm: ProjectInput = {
@@ -29,11 +30,15 @@ export function ProjectsPage() {
   const [form, setForm] = useState<ProjectInput>(emptyForm);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
   const [testing, setTesting] = useState(false);
   const [testMsg, setTestMsg] = useState<{ ok: boolean; text: string } | null>(
     null
   );
+  const [pendingDelete, setPendingDelete] = useState<Project | null>(null);
+  const [llmOpen, setLlmOpen] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null);
 
   async function load() {
     setLoading(true);
@@ -58,6 +63,8 @@ export function ProjectsPage() {
   function startEdit(project: Project) {
     setEditingId(project.id);
     setTestMsg(null);
+    setSaved(false);
+    setLlmOpen(Boolean(project.llm_provider));
     setForm({
       name: project.name,
       base_url: project.base_url || '',
@@ -70,11 +77,16 @@ export function ProjectsPage() {
       llm_model: project.llm_model || '',
       llm_base_url: project.llm_base_url || '',
     });
+    requestAnimationFrame(() => {
+      formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
   }
 
   function resetForm() {
     setEditingId(null);
     setTestMsg(null);
+    setSaved(false);
+    setLlmOpen(false);
     setForm(emptyForm);
   }
 
@@ -82,6 +94,7 @@ export function ProjectsPage() {
     e.preventDefault();
     setError('');
     setTestMsg(null);
+    setSaved(false);
     try {
       const payload: ProjectInput = {
         ...form,
@@ -103,6 +116,7 @@ export function ProjectsPage() {
         await api.createProject(payload);
       }
       resetForm();
+      setSaved(true);
       await load();
     } catch (err: any) {
       setError(err.message);
@@ -134,10 +148,10 @@ export function ProjectsPage() {
   }
 
   async function remove(id: number) {
-    if (!confirm('¿Eliminar este proyecto?')) return;
     try {
       await api.deleteProject(id);
       if (editingId === id) resetForm();
+      setPendingDelete(null);
       await load();
     } catch (err: any) {
       setError(err.message);
@@ -151,156 +165,173 @@ export function ProjectsPage() {
       <header className="page-head">
         <h1>Proyectos</h1>
         <p>
-          Configurá URLs base, claves de Jira, credenciales y el proveedor de LLM
-          de cada proyecto.
+          El entorno al que apunta el chat: URL de test, Jira y usuario de
+          prueba.
         </p>
       </header>
 
       <section className="panel">
-        <form onSubmit={onSubmit}>
-          <div className="grid-2">
-            <div className="field">
-              <label htmlFor="name">Nombre del proyecto</label>
-              <input
-                id="name"
-                required
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="Checkout staging"
-              />
+        <h2>{editingId ? `Editando ${form.name || 'proyecto'}` : 'Nuevo proyecto'}</h2>
+        <form ref={formRef} onSubmit={onSubmit}>
+          <fieldset className="form-section">
+            <legend>Identidad</legend>
+            <div className="grid-2">
+              <div className="field">
+                <label htmlFor="name">Nombre</label>
+                <input
+                  id="name"
+                  required
+                  value={form.name}
+                  onChange={(e) => setForm({ ...form, name: e.target.value })}
+                  placeholder="Checkout staging"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="jira_project_key">Clave de Jira</label>
+                <input
+                  id="jira_project_key"
+                  value={form.jira_project_key || ''}
+                  onChange={(e) =>
+                    setForm({ ...form, jira_project_key: e.target.value })
+                  }
+                  placeholder="PROJ"
+                />
+              </div>
             </div>
-            <div className="field">
-              <label htmlFor="jira_project_key">Clave de proyecto Jira</label>
-              <input
-                id="jira_project_key"
-                value={form.jira_project_key || ''}
-                onChange={(e) =>
-                  setForm({ ...form, jira_project_key: e.target.value })
-                }
-                placeholder="PROJ"
-              />
-            </div>
-          </div>
+          </fieldset>
 
-          <div className="grid-2">
-            <div className="field">
-              <label htmlFor="base_url">URL base de test</label>
-              <input
-                id="base_url"
-                value={form.base_url || ''}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                placeholder="https://staging.example.com"
-              />
+          <fieldset className="form-section">
+            <legend>Entorno</legend>
+            <div className="grid-2">
+              <div className="field">
+                <label htmlFor="base_url">URL base de test</label>
+                <input
+                  id="base_url"
+                  value={form.base_url || ''}
+                  onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+                  placeholder="https://staging.example.com"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="staging_url">URL secundaria</label>
+                <input
+                  id="staging_url"
+                  value={form.staging_url || ''}
+                  onChange={(e) =>
+                    setForm({ ...form, staging_url: e.target.value })
+                  }
+                  placeholder="https://preview.example.com"
+                />
+              </div>
             </div>
             <div className="field">
-              <label htmlFor="staging_url">URL secundaria</label>
+              <label htmlFor="jira_url">URL de Jira (si no es la global)</label>
               <input
-                id="staging_url"
-                value={form.staging_url || ''}
-                onChange={(e) =>
-                  setForm({ ...form, staging_url: e.target.value })
-                }
-                placeholder="https://preview.example.com"
+                id="jira_url"
+                value={form.jira_url || ''}
+                onChange={(e) => setForm({ ...form, jira_url: e.target.value })}
+                placeholder="https://company.atlassian.net"
               />
             </div>
-          </div>
+          </fieldset>
 
-          <div className="field">
-            <label htmlFor="jira_url">URL de Jira (override)</label>
-            <input
-              id="jira_url"
-              value={form.jira_url || ''}
-              onChange={(e) => setForm({ ...form, jira_url: e.target.value })}
-              placeholder="https://company.atlassian.net"
-            />
-          </div>
-
-          <div className="grid-2">
-            <div className="field">
-              <label htmlFor="test_user_email">Mail del usuario de test</label>
-              <input
-                id="test_user_email"
-                value={form.test_user_email || ''}
-                onChange={(e) =>
-                  setForm({ ...form, test_user_email: e.target.value })
-                }
-                placeholder="qa@example.com"
-              />
+          <fieldset className="form-section">
+            <legend>Usuario de prueba</legend>
+            <div className="grid-2">
+              <div className="field">
+                <label htmlFor="test_user_email">Mail</label>
+                <input
+                  id="test_user_email"
+                  value={form.test_user_email || ''}
+                  onChange={(e) =>
+                    setForm({ ...form, test_user_email: e.target.value })
+                  }
+                  placeholder="qa@example.com"
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="test_user_password">
+                  Contraseña
+                  {editingId ? ' (vacía = no cambiar)' : ''}
+                </label>
+                <input
+                  id="test_user_password"
+                  type="password"
+                  value={form.test_user_password || ''}
+                  onChange={(e) =>
+                    setForm({ ...form, test_user_password: e.target.value })
+                  }
+                  placeholder="••••••••"
+                  autoComplete="new-password"
+                />
+              </div>
             </div>
-            <div className="field">
-              <label htmlFor="test_user_password">
-                Contraseña de test
-                {editingId ? ' (dejala vacía para mantenerla)' : ''}
-              </label>
-              <input
-                id="test_user_password"
-                type="password"
-                value={form.test_user_password || ''}
-                onChange={(e) =>
-                  setForm({ ...form, test_user_password: e.target.value })
-                }
-                placeholder="••••••••"
-                autoComplete="new-password"
-              />
-            </div>
-          </div>
+          </fieldset>
 
-          <div className="field">
-            <label htmlFor="llm_provider">Proveedor de LLM</label>
-            <select
-              id="llm_provider"
-              value={form.llm_provider || ''}
-              onChange={(e) => {
-                const value = (e.target.value || null) as LlmProvider | null;
-                setTestMsg(null);
-                setForm({
-                  ...form,
-                  llm_provider: value,
-                  llm_model: '',
-                  llm_base_url: '',
-                });
-              }}
-            >
-              <option value="">Usar el default global</option>
-              {providers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                  {p.configured ? ' (configurado)' : ''}
-                </option>
-              ))}
-            </select>
-            <p className="hint">
-              {selectedProvider
-                ? 'Dejá modelo y URL vacíos para usar los de Configuración. Completalos solo si este proyecto usa otro modelo.'
-                : 'Sin override: el chat usa el proveedor y modelo de Configuración.'}
+          <details
+            className="form-disclose"
+            open={llmOpen}
+            onToggle={(e) => setLlmOpen(e.currentTarget.open)}
+          >
+            <summary>Modelo LLM (opcional)</summary>
+            <p className="hint hint-block">
+              Si no lo tocás, el chat usa el modelo de Configuración.
             </p>
-          </div>
+            <div className="field">
+              <label htmlFor="llm_provider">Proveedor</label>
+              <select
+                id="llm_provider"
+                value={form.llm_provider || ''}
+                onChange={(e) => {
+                  const value = (e.target.value || null) as LlmProvider | null;
+                  setTestMsg(null);
+                  setForm({
+                    ...form,
+                    llm_provider: value,
+                    llm_model: '',
+                    llm_base_url: '',
+                  });
+                }}
+              >
+                <option value="">Usar el default global</option>
+                {providers.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                    {p.configured ? ' (configurado)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          {selectedProvider && (
-            <LlmModelFields
-              providerId={selectedProvider}
-              providers={providers}
-              model={form.llm_model || ''}
-              baseUrl={form.llm_base_url || ''}
-              onModelChange={(value) =>
-                setForm({ ...form, llm_model: value })
-              }
-              onBaseUrlChange={(value) =>
-                setForm({ ...form, llm_base_url: value })
-              }
-              allowEmpty
-              showBaseUrl={
-                selectedProvider === 'openai-compatible' ||
-                selectedProvider === 'deepseek' ||
-                selectedProvider === 'ollama' ||
-                selectedProvider === 'openai'
-              }
-            />
-          )}
+            {selectedProvider && (
+              <LlmModelFields
+                providerId={selectedProvider}
+                providers={providers}
+                model={form.llm_model || ''}
+                baseUrl={form.llm_base_url || ''}
+                onModelChange={(value) =>
+                  setForm({ ...form, llm_model: value })
+                }
+                onBaseUrlChange={(value) =>
+                  setForm({ ...form, llm_base_url: value })
+                }
+                allowEmpty
+                showBaseUrl={
+                  selectedProvider === 'openai-compatible' ||
+                  selectedProvider === 'deepseek' ||
+                  selectedProvider === 'ollama' ||
+                  selectedProvider === 'openai'
+                }
+              />
+            )}
+          </details>
 
           {error && <p className="error">{error}</p>}
           {testMsg && (
             <p className={testMsg.ok ? 'saved-msg' : 'error'}>{testMsg.text}</p>
+          )}
+          {saved && !editingId && (
+            <p className="saved-msg">Proyecto guardado.</p>
           )}
 
           <div className="actions">
@@ -325,11 +356,11 @@ export function ProjectsPage() {
       </section>
 
       <section className="panel">
-        <h2>Proyectos guardados</h2>
+        <h2>Guardados</h2>
         {loading ? (
           <p className="empty">Cargando…</p>
         ) : projects.length === 0 ? (
-          <p className="empty">Todavía no hay proyectos. Creá uno arriba.</p>
+          <p className="empty">Todavía no hay ninguno. Completá el de arriba.</p>
         ) : (
           <div className="list">
             {projects.map((project) => (
@@ -341,7 +372,7 @@ export function ProjectsPage() {
                     {project.llm_provider || 'LLM por defecto'}
                     {project.jira_project_key
                       ? ` · Jira ${project.jira_project_key}`
-                      : ' · Sin Jira (configurá la clave para iniciar)'}
+                      : ' · Sin clave Jira'}
                   </p>
                 </div>
                 <div className="actions">
@@ -360,7 +391,7 @@ export function ProjectsPage() {
                   <button
                     className="btn btn-danger btn-compact"
                     type="button"
-                    onClick={() => remove(project.id)}
+                    onClick={() => setPendingDelete(project)}
                   >
                     <Icon name="trash" size={14} />
                     Eliminar
@@ -371,6 +402,22 @@ export function ProjectsPage() {
           </div>
         )}
       </section>
+
+      <ConfirmDialog
+        open={Boolean(pendingDelete)}
+        title="¿Eliminar este proyecto?"
+        body={
+          pendingDelete
+            ? `Se borra “${pendingDelete.name}” y deja de estar disponible en el chat.`
+            : ''
+        }
+        confirmLabel="Eliminar"
+        danger
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => {
+          if (pendingDelete) void remove(pendingDelete.id);
+        }}
+      />
     </>
   );
 }

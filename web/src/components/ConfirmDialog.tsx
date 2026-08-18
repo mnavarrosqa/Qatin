@@ -25,17 +25,18 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const titleId = useId();
   const bodyId = useId();
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    confirmRef.current?.focus();
+    (danger ? cancelRef : confirmRef).current?.focus();
     function onKey(ev: KeyboardEvent) {
       if (ev.key === 'Escape' && !busy) onCancel();
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [open, busy, onCancel]);
+  }, [open, busy, danger, onCancel]);
 
   if (!open) return null;
 
@@ -59,6 +60,7 @@ export function ConfirmDialog({
         <p id={bodyId}>{body}</p>
         <div className="confirm-actions">
           <button
+            ref={cancelRef}
             type="button"
             className="btn btn-ghost"
             disabled={busy}
